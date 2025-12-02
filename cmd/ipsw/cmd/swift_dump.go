@@ -32,10 +32,10 @@ import (
 	"github.com/apex/log"
 	"github.com/blacktop/go-macho"
 	"github.com/blacktop/go-macho/pkg/swift"
+	"github.com/blacktop/ipsw/internal/colors"
 	mcmd "github.com/blacktop/ipsw/internal/commands/macho"
 	"github.com/blacktop/ipsw/internal/demangle"
 	"github.com/blacktop/ipsw/internal/magic"
-	"github.com/blacktop/ipsw/internal/utils"
 	"github.com/blacktop/ipsw/pkg/dyld"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -137,7 +137,7 @@ var swiftDumpCmd = &cobra.Command{
 			Deps:        viper.GetBool("swift-dump.deps"),
 			Demangle:    doDemangle,
 			IpswVersion: fmt.Sprintf("Version: %s, BuildCommit: %s", strings.TrimSpace(AppVersion), strings.TrimSpace(AppBuildCommit)),
-			Color:       utils.ColorEnabled(),
+			Color:       colors.Active(),
 			Theme:       viper.GetString("swift-dump.theme"),
 			Output:      viper.GetString("swift-dump.output"),
 			Headers:     viper.GetBool("swift-dump.headers"),

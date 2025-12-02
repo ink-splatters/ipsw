@@ -35,8 +35,8 @@ import (
 
 	"github.com/MakeNowJust/heredoc/v2"
 	"github.com/apex/log"
-	"github.com/fatih/color"
 
+	"github.com/blacktop/ipsw/internal/colors"
 	mcmd "github.com/blacktop/ipsw/internal/commands/macho"
 	"github.com/blacktop/ipsw/internal/profile"
 	"github.com/blacktop/ipsw/pkg/kernelcache/cpp"
@@ -45,9 +45,9 @@ import (
 )
 
 var (
-	colorClass  = color.New(color.Bold, color.FgHiMagenta).SprintFunc()
-	colorBundle = color.New(color.Bold, color.FgHiBlue).SprintFunc()
-	colorAddr   = color.New(color.Faint).SprintfFunc()
+	colorClass  = colors.BoldHiMagenta().SprintFunc()
+	colorBundle = colors.BoldHiBlue().SprintFunc()
+	colorAddr   = colors.Faint().SprintfFunc()
 )
 
 func init() {
