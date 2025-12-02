@@ -35,9 +35,9 @@ import (
 	"github.com/AlecAivazis/survey/v2/terminal"
 	"github.com/apex/log"
 	"github.com/blacktop/go-plist"
+	"github.com/blacktop/ipsw/internal/colors"
 	"github.com/blacktop/ipsw/internal/magic"
 	"github.com/blacktop/ipsw/internal/utils"
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -123,7 +123,7 @@ type diffSection struct {
 	title  string
 	items  []string
 	prefix string
-	clr    *color.Color
+	format func(string, ...any) string
 }
 
 func printSection(s diffSection) bool {
@@ -131,9 +131,9 @@ func printSection(s diffSection) bool {
 		return false
 	}
 	fmt.Println()
-	color.New(color.Bold).Println(s.title)
+	fmt.Println(colors.Bold().Sprint(s.title))
 	for _, item := range s.items {
-		s.clr.Printf("  %s %s\n", s.prefix, item)
+		fmt.Println(s.format("  %s %s", s.prefix, item))
 	}
 	return true
 }
@@ -288,7 +288,7 @@ var kdkDiffCmd = &cobra.Command{
 
 		showBinaryDetails := viper.GetBool("kdk-diff.binary-details")
 		diffTool := viper.GetString("diff-tool")
-		useColor := viper.GetBool("color") && !viper.GetBool("no-color")
+		useColor := colors.Active()
 
 		var (
 			addedBin, removedBin, modifiedBin []string
@@ -379,11 +379,11 @@ var kdkDiffCmd = &cobra.Command{
 		hasOutput := false
 
 		for _, s := range []diffSection{
-			{"Removed Binaries:", removedBin, "-", color.New(color.FgRed)},
-			{"Added Binaries:", addedBin, "+", color.New(color.FgGreen)},
-			{"Modified Binaries:", modifiedBin, "~", color.New(color.FgYellow)},
-			{"Removed Text Files:", removedText, "-", color.New(color.FgRed)},
-			{"Added Text Files:", addedText, "+", color.New(color.FgGreen)},
+			{"Removed Binaries:", removedBin, "-", colors.Red().SprintfFunc()},
+			{"Added Binaries:", addedBin, "+", colors.Green().SprintfFunc()},
+			{"Modified Binaries:", modifiedBin, "~", colors.Yellow().SprintfFunc()},
+			{"Removed Text Files:", removedText, "-", colors.Red().SprintfFunc()},
+			{"Added Text Files:", addedText, "+", colors.Green().SprintfFunc()},
 		} {
 			if printSection(s) {
 				hasOutput = true
@@ -393,8 +393,8 @@ var kdkDiffCmd = &cobra.Command{
 		if len(textDiffs) > 0 {
 			hasOutput = true
 			fmt.Println()
-			color.New(color.Bold).Println("Modified Text Files:")
-			cyan := color.New(color.FgCyan)
+			fmt.Println(colors.Bold().Sprint("Modified Text Files:"))
+			cyan := colors.Cyan()
 			separator := strings.Repeat("─", 60)
 			for _, td := range textDiffs {
 				fmt.Println()
