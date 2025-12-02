@@ -40,6 +40,7 @@ import (
 	"github.com/alecthomas/chroma/v2/quick"
 	"github.com/apex/log"
 	godl "github.com/blacktop/go-download"
+	"github.com/blacktop/ipsw/internal/colors"
 	"github.com/blacktop/ipsw/internal/commands/extract"
 	"github.com/blacktop/ipsw/internal/download"
 	"github.com/blacktop/ipsw/internal/utils"
@@ -379,7 +380,7 @@ var downloadAppledbCmd = &cobra.Command{
 				if err != nil {
 					return err
 				}
-				if utils.ColorEnabled() {
+				if colors.Active() {
 					if err := quick.Highlight(os.Stdout, string(b)+"\n", "json", "terminal256", "nord"); err != nil {
 						return fmt.Errorf("failed to highlight json: %v", err)
 					}
