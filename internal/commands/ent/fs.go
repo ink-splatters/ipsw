@@ -282,22 +282,26 @@ func printFilesystemEntitlements(records []filesystemEntitlementRecord, query Fi
 }
 
 func printFilesystemText(records []filesystemEntitlementRecord, fileOnly bool) error {
+	return printFilesystemTextTo(os.Stdout, records, fileOnly)
+}
+
+func printFilesystemTextTo(w io.Writer, records []filesystemEntitlementRecord, fileOnly bool) error {
 	if fileOnly {
 		for _, record := range records {
-			fmt.Println(colorBin(record.Path))
+			fmt.Fprintln(w, record.Path)
 		}
 		return nil
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 1, ' ', 0)
+	tw := tabwriter.NewWriter(w, 0, 0, 1, ' ', 0)
 	for _, record := range records {
 		data, err := json.Marshal(record.Entitlements)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(w, "%s\t%s\n", colorBin(record.Path), colorValue(string(data)))
+		fmt.Fprintf(tw, "%s\t%s\n", colorBin(record.Path), colorValue(string(data)))
 	}
-	return w.Flush()
+	return tw.Flush()
 }
 
 func printFilesystemTSV(records []filesystemEntitlementRecord, fileOnly bool) error {

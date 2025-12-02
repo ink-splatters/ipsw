@@ -76,3 +76,14 @@ func TestPrintFilesystemJSONLHonorsFileOnly(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+func TestPrintFilesystemTextFileOnlyIsPlain(t *testing.T) {
+	records := []filesystemEntitlementRecord{{Path: "/usr/libexec/testd"}}
+	var buf bytes.Buffer
+	if err := printFilesystemTextTo(&buf, records, true); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := buf.String(), "/usr/libexec/testd\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}

@@ -47,7 +47,7 @@ import (
 	"github.com/blacktop/ipsw/cmd/ipsw/cmd/ota"
 	"github.com/blacktop/ipsw/cmd/ipsw/cmd/sb"
 	"github.com/blacktop/ipsw/cmd/ipsw/cmd/ssh"
-	"github.com/fatih/color"
+	"github.com/blacktop/ipsw/internal/colors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -70,9 +70,7 @@ var rootCmd = &cobra.Command{
 		if viper.GetBool("verbose") {
 			log.SetLevel(log.DebugLevel)
 		}
-		if viper.GetBool("no-color") {
-			color.NoColor = true
-		}
+		colors.Init()
 		return download.ApplyDownloadPolicy()
 	},
 }

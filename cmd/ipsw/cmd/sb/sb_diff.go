@@ -36,10 +36,10 @@ import (
 
 	"github.com/alecthomas/chroma/v2/quick"
 	"github.com/apex/log"
+	"github.com/blacktop/ipsw/internal/colors"
 	"github.com/blacktop/ipsw/internal/utils"
 	"github.com/blacktop/ipsw/pkg/aea"
 	"github.com/blacktop/ipsw/pkg/info"
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -216,7 +216,7 @@ var sbDiffCmd = &cobra.Command{
 		for _, f := range files {
 			newSbData := sbDBs[1][f]
 			if oldSbData, ok := sbDBs[0][f]; ok {
-				out, err := utils.GitDiff(oldSbData+"\n", newSbData+"\n", &utils.GitDiffConfig{Color: utils.ColorEnabled()})
+				out, err := utils.GitDiff(oldSbData+"\n", newSbData+"\n", &utils.GitDiffConfig{Color: colors.Active()})
 				if err != nil {
 					return fmt.Errorf("failed to diff %s: %v", f, err)
 				}
@@ -226,7 +226,7 @@ var sbDiffCmd = &cobra.Command{
 				if classifyRules {
 					printSandboxRuleClassificationDiff(f, oldSbData, newSbData)
 				}
-				fmt.Println(color.New(color.Bold).Sprintf("\n%s\n", f))
+				fmt.Println(colors.Bold().Sprintf("\n%s\n", f))
 				fmt.Println(" ╭╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴")
 				fmt.Println(out)
 				fmt.Println(" ╰╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴")
@@ -234,9 +234,9 @@ var sbDiffCmd = &cobra.Command{
 				if classifyRules {
 					printSandboxRuleClassificationDiff(f, "", newSbData)
 				}
-				fmt.Println(color.New(color.Bold).Sprintf("\n🆕 %s\n", f))
+				fmt.Println(colors.Bold().Sprintf("\n🆕 %s\n", f))
 				fmt.Println(" ╭╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴")
-				if utils.ColorAllowed() {
+				if colors.Active() {
 					quick.Highlight(os.Stdout, newSbData, "scheme", "terminal256", "nord")
 				} else {
 					fmt.Print(newSbData)
@@ -577,7 +577,7 @@ func isSBDiffSpace(ch byte) bool {
 
 func printSandboxRuleClassificationDiff(profile string, oldData string, newData string) {
 	deltas := sandboxRuleClassificationDiff(oldData, newData)
-	title := color.New(color.Bold).Sprintf("\nRule classification: %s\n", profile)
+	title := colors.Bold().Sprintf("\nRule classification: %s\n", profile)
 	fmt.Print(title)
 	if len(deltas) == 0 {
 		fmt.Println("  no added/removed allow/deny rules")
