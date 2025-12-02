@@ -34,6 +34,7 @@ import (
 	"github.com/blacktop/go-macho"
 	"github.com/blacktop/go-macho/types"
 	"github.com/blacktop/ipsw/internal/ai"
+	"github.com/blacktop/ipsw/internal/colors"
 	dcmd "github.com/blacktop/ipsw/internal/commands/disass"
 	mcmd "github.com/blacktop/ipsw/internal/commands/macho"
 	"github.com/blacktop/ipsw/internal/magic"
@@ -242,7 +243,7 @@ var machoDisassCmd = &cobra.Command{
 							AsJSON:       asJSON,
 							Demangle:     demangleFlag,
 							Quiet:        quiet,
-							Color:        viper.GetBool("color") && !viper.GetBool("no-color") && !decompile,
+							Color:        colors.Active() && !decompile,
 						})
 
 						//***********************
@@ -283,7 +284,7 @@ var machoDisassCmd = &cobra.Command{
 								Stream:         false,
 								DisableCache:   viper.GetBool("macho.disass.dec-nocache"),
 								Verbose:        viper.GetBool("verbose"),
-								Color:          viper.GetBool("color") && !viper.GetBool("no-color"),
+								Color:          colors.Active(),
 								Theme:          viper.GetString("macho.disass.dec-theme"),
 								MaxRetries:     viper.GetInt("macho.disass.dec-retries"),
 								RetryBackoff:   viper.GetDuration("macho.disass.dec-retry-backoff"),
@@ -370,7 +371,7 @@ var machoDisassCmd = &cobra.Command{
 						AsJSON:       asJSON,
 						Demangle:     demangleFlag,
 						Quiet:        quiet,
-						Color:        viper.GetBool("color") && !viper.GetBool("no-color") && !decompile,
+						Color:        colors.Active() && !decompile,
 					})
 
 					//***********************
@@ -414,7 +415,7 @@ var machoDisassCmd = &cobra.Command{
 							Stream:         false,
 							DisableCache:   viper.GetBool("macho.disass.dec-nocache"),
 							Verbose:        viper.GetBool("verbose"),
-							Color:          viper.GetBool("color") && !viper.GetBool("no-color"),
+							Color:          colors.Active(),
 							Theme:          viper.GetString("macho.disass.dec-theme"),
 							MaxRetries:     viper.GetInt("macho.disass.dec-retries"),
 							RetryBackoff:   viper.GetDuration("macho.disass.dec-retry-backoff"),
