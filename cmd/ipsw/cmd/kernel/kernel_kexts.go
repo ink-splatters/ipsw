@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/apex/log"
+	"github.com/blacktop/ipsw/internal/colors"
 	mcmd "github.com/blacktop/ipsw/internal/commands/macho"
 	"github.com/blacktop/ipsw/internal/utils"
 	"github.com/blacktop/ipsw/pkg/kernelcache"
@@ -98,7 +99,7 @@ var kextsCmd = &cobra.Command{
 			out, err := utils.GitDiff(
 				strings.Join(kout1, "\n"),
 				strings.Join(kout2, "\n"),
-				&utils.GitDiffConfig{Color: utils.ColorEnabled(), Tool: viper.GetString("diff-tool")})
+				&utils.GitDiffConfig{Color: colors.Active(), Tool: viper.GetString("diff-tool")})
 			if err != nil {
 				return err
 			}
