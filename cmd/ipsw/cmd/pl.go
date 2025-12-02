@@ -37,6 +37,7 @@ import (
 	"github.com/alecthomas/chroma/v2/quick"
 	"github.com/apex/log"
 	"github.com/blacktop/go-plist"
+	"github.com/blacktop/ipsw/internal/colors"
 	"github.com/blacktop/ipsw/internal/utils"
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
@@ -160,7 +161,7 @@ var plistCmd = &cobra.Command{
 						}
 
 						if prev, ok := cache[event.Name]; ok {
-							out, err := utils.GitDiff(prev+"\n", string(jdata)+"\n", &utils.GitDiffConfig{Color: utils.ColorAllowed()})
+							out, err := utils.GitDiff(prev+"\n", string(jdata)+"\n", &utils.GitDiffConfig{Color: colors.Active()})
 							if err != nil {
 								log.Fatal(err.Error())
 							}
@@ -242,7 +243,7 @@ var plistCmd = &cobra.Command{
 			return fmt.Errorf("failed to marshal json: %v", err)
 		}
 
-		if utils.ColorEnabled() {
+		if colors.Active() {
 			if err := quick.Highlight(os.Stdout, string(jsonData)+"\n", "json", "terminal256", "nord"); err != nil {
 				return fmt.Errorf("failed to highlight json: %v", err)
 			}

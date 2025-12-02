@@ -28,7 +28,6 @@ import (
 	"github.com/MakeNowJust/heredoc/v2"
 	"github.com/apex/log"
 	"github.com/blacktop/ipsw/internal/commands/ent"
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -204,9 +203,6 @@ var entCmd = &cobra.Command{
 			if len(ipsws) == 0 && len(inputs) == 0 {
 				return fmt.Errorf("--fs requires an IPSW argument, --ipsw, or --input")
 			}
-			if viper.GetBool("no-color") || fileOnly || format == "jsonl" || format == "tsv" {
-				color.NoColor = true
-			}
 			return ent.SearchFilesystemEntitlements(ipsws, inputs, ent.FilesystemQuery{
 				PemDB:        pemDB,
 				KeyPattern:   keyPattern,
@@ -307,10 +303,6 @@ var entCmd = &cobra.Command{
 				return ent.CreateSQLiteDatabaseWithReplacement(sqliteDB, ipsws, inputs, replaceStrategy, dryRun)
 			}
 			return ent.CreateSQLiteDatabase(sqliteDB, ipsws, inputs)
-		}
-
-		if viper.GetBool("no-color") || fileOnly {
-			color.NoColor = true
 		}
 
 		if showStats {

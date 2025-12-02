@@ -41,6 +41,7 @@ import (
 	"github.com/apex/log"
 	"github.com/blacktop/go-macho/pkg/cpio"
 	"github.com/blacktop/go-macho/pkg/xar"
+	"github.com/blacktop/ipsw/internal/colors"
 	"github.com/blacktop/ipsw/internal/magic"
 	"github.com/blacktop/ipsw/internal/utils"
 	"github.com/blacktop/ipsw/pkg/bom"
@@ -378,7 +379,7 @@ var pkgCmd = &cobra.Command{
 				utils.Indent(log.Info, 2)("Distribution Scripts")
 				if main, ok := dist.GetScripts()["main"]; ok {
 					for _, script := range main {
-						if utils.ColorAllowed() {
+						if colors.Active() {
 							quick.Highlight(os.Stdout, script, "js", "terminal256", "nord")
 						} else {
 							fmt.Print(script)
@@ -444,7 +445,7 @@ var pkgCmd = &cobra.Command{
 						}
 						break
 					}
-					if utils.ColorAllowed() {
+					if colors.Active() {
 						quick.Highlight(os.Stdout, string(data), lexerName, "terminal256", "nord")
 					} else {
 						fmt.Print(string(data))

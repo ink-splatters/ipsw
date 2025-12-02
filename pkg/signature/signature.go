@@ -13,6 +13,7 @@ import (
 	"github.com/apex/log"
 	"github.com/blacktop/go-macho"
 	"github.com/blacktop/go-macho/types"
+	"github.com/blacktop/ipsw/internal/colors"
 	"github.com/blacktop/ipsw/internal/utils"
 	"github.com/blacktop/ipsw/pkg/disass"
 	"github.com/blacktop/ipsw/pkg/kernelcache"
@@ -356,11 +357,6 @@ func (sm SymbolMap) SymbolicateMachO(kc *macho.File, kernelName string, sigs []S
 	var p *mpb.Progress
 	var bar *mpb.Bar
 	if quiet && len(validSigs) > 0 {
-		name := "   • Symbolicating signatures "
-		if utils.ColorAllowed() {
-			// Use same blue color as apex/log info level for consistency.
-			name = "\033[34m\033[1m" + name + "\033[0m"
-		}
 		p = mpb.New(
 			mpb.WithWidth(60),
 			mpb.WithRefreshRate(180*time.Millisecond),
@@ -368,7 +364,7 @@ func (sm SymbolMap) SymbolicateMachO(kc *macho.File, kernelName string, sigs []S
 		bar = p.AddBar(int64(len(validSigs)),
 			mpb.BarFillerClearOnComplete(),
 			mpb.PrependDecorators(
-				decor.Name(name, decor.WC{C: decor.DindentRight}),
+				decor.Name(colors.BoldBlue().Sprint("   • Symbolicating signatures "), decor.WC{C: decor.DindentRight}),
 			),
 			mpb.AppendDecorators(
 				decor.CountersNoUnit("%d/%d", decor.WCSyncWidth),

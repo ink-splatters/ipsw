@@ -33,8 +33,8 @@ import (
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/apex/log"
 	"github.com/blacktop/ipsw/internal/ai"
+	"github.com/blacktop/ipsw/internal/colors"
 	dcmd "github.com/blacktop/ipsw/internal/commands/disass"
-	"github.com/blacktop/ipsw/internal/utils"
 	"github.com/blacktop/ipsw/pkg/disass"
 	"github.com/blacktop/ipsw/pkg/dyld"
 	"github.com/pkg/errors"
@@ -210,7 +210,7 @@ var DisassCmd = &cobra.Command{
 				Stream:         false,
 				DisableCache:   viper.GetBool("dyld.disass.dec-nocache"),
 				Verbose:        viper.GetBool("verbose"),
-				Color:          utils.ColorEnabled(),
+				Color:          colors.Active(),
 				Theme:          viper.GetString("dyld.disass.dec-theme"),
 				MaxRetries:     viper.GetInt("dyld.disass.dec-retries"),
 				RetryBackoff:   viper.GetDuration("dyld.disass.dec-retry-backoff"),
@@ -262,7 +262,7 @@ var DisassCmd = &cobra.Command{
 						AsJSON:       asJSON,
 						Demangle:     demangleFlag,
 						Quiet:        quiet,
-						Color:        utils.ColorEnabled() && !decompile,
+						Color:        colors.Active(),
 					})
 
 					if !quiet {
@@ -368,7 +368,7 @@ var DisassCmd = &cobra.Command{
 						AsJSON:       asJSON,
 						Demangle:     demangleFlag,
 						Quiet:        quiet,
-						Color:        utils.ColorEnabled() && !decompile,
+						Color:        colors.Active() && !decompile,
 					})
 
 					if !quiet {
@@ -497,7 +497,7 @@ var DisassCmd = &cobra.Command{
 					AsJSON:       asJSON,
 					Demangle:     demangleFlag,
 					Quiet:        quiet,
-					Color:        utils.ColorEnabled() && !decompile,
+					Color:        colors.Active() && !decompile,
 				})
 
 				if !quiet {
