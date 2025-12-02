@@ -34,10 +34,10 @@ import (
 	"github.com/AlecAivazis/survey/v2/terminal"
 	"github.com/MakeNowJust/heredoc/v2"
 	"github.com/apex/log"
+	"github.com/blacktop/ipsw/internal/colors"
 	pcccmd "github.com/blacktop/ipsw/internal/commands/pcc"
 	"github.com/blacktop/ipsw/internal/download"
 	"github.com/blacktop/ipsw/internal/utils"
-	"github.com/fatih/color"
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -386,9 +386,9 @@ var vphoneDisplay = map[vphoneState]struct {
 	color               func(...any) string
 	warn                bool
 }{
-	vphonePresent: {"📱VPHN ", "📱 VPHONE", "vphone600 firmware present", color.New(color.Bold, color.FgHiGreen).SprintFunc(), false},
-	vphoneMissing: {"🚫NONE ", "🚫 NO VPHONE", "vphone600 firmware REMOVED — vresearch-only", color.New(color.Bold, color.FgHiRed).SprintFunc(), true},
-	vphoneVRE:     {"⬢VRE   ", "⬢ VRE", "metadata-only marker — IPSW firmware not checked", color.New(color.Bold, color.FgHiYellow).SprintFunc(), true},
+	vphonePresent: {"📱VPHN ", "📱 VPHONE", "vphone600 firmware present", colors.BoldHiGreen().SprintFunc(), false},
+	vphoneMissing: {"🚫NONE ", "🚫 NO VPHONE", "vphone600 firmware REMOVED — vresearch-only", colors.BoldHiRed().SprintFunc(), true},
+	vphoneVRE:     {"⬢VRE   ", "⬢ VRE", "metadata-only marker — IPSW firmware not checked", colors.BoldHiYellow().SprintFunc(), true},
 	vphoneUnknown: {"       ", "", "", nil, false},
 }
 

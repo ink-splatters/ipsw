@@ -32,8 +32,8 @@ import (
 	"strings"
 
 	"github.com/apex/log"
+	"github.com/blacktop/ipsw/internal/colors"
 	"github.com/blacktop/ipsw/pkg/notif"
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -64,10 +64,6 @@ var notifCmd = &cobra.Command{
 		if Verbose {
 			log.SetLevel(log.DebugLevel)
 		}
-		if viper.GetBool("no-color") {
-			color.NoColor = true
-		}
-
 		dbPath := viper.GetString("notif.db")
 		bundleID := viper.GetString("notif.app")
 		listApps := viper.GetBool("notif.apps")
@@ -107,9 +103,9 @@ var notifCmd = &cobra.Command{
 			return enc.Encode(recs)
 		}
 
-		titleC := color.New(color.Bold, color.FgHiBlue).SprintFunc()
-		bundleC := color.New(color.FgHiCyan).SprintFunc()
-		dim := color.New(color.Faint).SprintFunc()
+		titleC := colors.BoldHiBlue().SprintFunc()
+		bundleC := colors.HiCyan().SprintFunc()
+		dim := colors.Faint().SprintFunc()
 
 		for _, r := range recs {
 			if r.Delivered.IsZero() {

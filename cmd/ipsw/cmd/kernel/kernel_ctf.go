@@ -30,6 +30,7 @@ import (
 
 	"github.com/apex/log"
 	"github.com/blacktop/go-macho"
+	"github.com/blacktop/ipsw/internal/colors"
 	mcmd "github.com/blacktop/ipsw/internal/commands/macho"
 	"github.com/blacktop/ipsw/internal/utils"
 	"github.com/blacktop/ipsw/pkg/ctf"
@@ -150,7 +151,10 @@ var ctfdumpCmd = &cobra.Command{
 			out, err := utils.GitDiff(
 				t1.String(),
 				t2.String(),
-				&utils.GitDiffConfig{Color: utils.ColorEnabled(), Tool: viper.GetString("diff-tool")})
+				&utils.GitDiffConfig{
+					Color: colors.Active(),
+					Tool:  viper.GetString("diff-tool"),
+				})
 			if err != nil {
 				return err
 			}

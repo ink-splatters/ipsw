@@ -13,15 +13,15 @@ import (
 
 	"github.com/apex/log"
 	"github.com/blacktop/go-termimg"
+	"github.com/blacktop/ipsw/internal/colors"
 	"github.com/blacktop/ipsw/internal/utils"
 	"github.com/dustin/go-humanize"
-	"github.com/fatih/color"
 )
 
 var (
-	colorTitle    = color.New(color.Bold, color.FgHiMagenta).SprintFunc()
-	colorField    = color.New(color.Bold, color.FgHiBlue).SprintFunc()
-	colorSubField = color.New(color.Bold, color.FgHiCyan).SprintFunc()
+	colorTitle    = colors.BoldHiMagenta().SprintFunc()
+	colorField    = colors.BoldHiBlue().SprintFunc()
+	colorSubField = colors.BoldHiCyan().SprintFunc()
 )
 
 func (a *Asset) String() string {
