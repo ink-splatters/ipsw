@@ -32,10 +32,10 @@ import (
 	"strings"
 
 	"github.com/apex/log"
+	"github.com/blacktop/ipsw/internal/colors"
 	"github.com/blacktop/ipsw/internal/download"
 	"github.com/blacktop/ipsw/pkg/info"
 	"github.com/blacktop/ipsw/pkg/ota/types"
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -265,11 +265,11 @@ func boardSummary(b info.Board) string {
 }
 
 func renderDryRunReport(report mergeReport, discoveredCount int, dbPath string) {
-	title := color.New(color.Bold, color.FgCyan).SprintFunc()
-	green := color.New(color.FgGreen).SprintFunc()
-	yellow := color.New(color.FgYellow).SprintFunc()
-	red := color.New(color.FgRed).SprintFunc()
-	muted := color.New(color.Faint).SprintFunc()
+	title := colors.BoldCyan().SprintFunc()
+	green := colors.Green().SprintFunc()
+	yellow := colors.Yellow().SprintFunc()
+	red := colors.Red().SprintFunc()
+	muted := colors.Faint().SprintFunc()
 
 	fmt.Println(title("updatedb dry-run preview"))
 	if len(dbPath) > 0 {

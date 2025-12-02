@@ -18,11 +18,11 @@ import (
 
 	"github.com/alecthomas/chroma/v2/quick"
 	"github.com/apex/log"
+	"github.com/blacktop/ipsw/internal/colors"
 	"github.com/blacktop/ipsw/internal/search"
 	"github.com/blacktop/ipsw/internal/utils"
 	"github.com/blacktop/ipsw/pkg/aea"
 	"github.com/blacktop/ipsw/pkg/info"
-	"github.com/fatih/color"
 )
 
 // Entitlements is a map of entitlements
@@ -238,7 +238,7 @@ func DiffDatabases(db1, db2 map[string]string, conf *Config) (string, error) {
 				buf.WriteString(fmt.Sprintf("### %s\n\n> `%s`\n\n", filepath.Base(f2), f2))
 				buf.WriteString("```diff\n" + out + "\n```\n")
 			} else {
-				buf.WriteString(color.New(color.Bold).Sprintf("\n%s\n\n", f2))
+				buf.WriteString(colors.Bold().Sprintf("\n%s\n\n", f2))
 				buf.WriteString(out + "\n")
 			}
 		} else {
@@ -246,7 +246,7 @@ func DiffDatabases(db1, db2 map[string]string, conf *Config) (string, error) {
 			if conf.Markdown {
 				buf.WriteString(fmt.Sprintf("\n### 🆕 %s\n\n> `%s`\n\n", filepath.Base(f2), f2))
 			} else {
-				buf.WriteString(color.New(color.Bold).Sprintf("\n🆕 %s\n\n", f2))
+				buf.WriteString(colors.Bold().Sprintf("\n🆕 %s\n\n", f2))
 			}
 			if len(e2) == 0 {
 				buf.WriteString("- No entitlements *(yet)*\n")

@@ -18,6 +18,7 @@ import (
 	"github.com/blacktop/go-macho/pkg/trie"
 	"github.com/blacktop/go-macho/types"
 	"github.com/blacktop/ipsw/internal/demangle"
+	"github.com/blacktop/ipsw/internal/colors"
 	"github.com/blacktop/ipsw/internal/utils"
 	"github.com/blacktop/ipsw/pkg/disass"
 	"github.com/blacktop/ipsw/pkg/symbols"
@@ -1137,7 +1138,7 @@ func (i *CacheImage) ParseLocalSymbols(dump bool) error {
 					Nlist64:      nlist,
 					Macho:        m,
 					FoundInDylib: filepath.Base(i.Name),
-				}.String(utils.ColorAllowed()))
+				}.String(colors.Active()))
 			}
 		}
 
