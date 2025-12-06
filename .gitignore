@@ -71,7 +71,6 @@ www/docs/static/releases*.json
 # Other
 *.unstripped
 *.bndb
-*.lock
 *.mobileprovision
 *.img
 *.pkg
@@ -89,3 +88,8 @@ cmd/ipsw/cmd/sb/sb_*.go
 !cmd/ipsw/cmd/sb/sb_diff.go
 internal/commands/sb/
 pkg/sandbox/
+
+/.direnv
+
+# git-hooks.nix
+/.pre-commit-config.yaml
