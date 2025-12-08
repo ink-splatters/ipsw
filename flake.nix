@@ -10,6 +10,15 @@
     systems.url = "github:nix-systems/default";
   };
 
+  nixConfig = {
+    extra-substituters = [
+      "https://aarch64-darwin.cachix.org"
+    ];
+    extra-trusted-public-keys = [
+      "aarch64-darwin.cachix.org-1:mEz8A1jcJveehs/ZbZUEjXZ65Aukk9bg2kmb0zL9XDA="
+    ];
+  };
+
   outputs = inputs @ {flake-parts, ...}:
     flake-parts.lib.mkFlake {inherit inputs;} (let
       systems = import inputs.systems;
