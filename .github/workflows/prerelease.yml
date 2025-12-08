@@ -18,9 +18,9 @@ env:
 
 jobs:
   goreleaser:
+    if: false # disabled
     # macOS runner (Apple Silicon) builds arm64 extras + cross-compiles linux/windows via Zig
     runs-on: macos-latest
-    if: github.ref_type == 'branch' && github.ref == 'refs/heads/master'
 
     steps:
       - name: Checkout

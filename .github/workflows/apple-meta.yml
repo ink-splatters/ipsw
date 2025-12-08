@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   build:
+    if: false # disabled
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

@@ -18,6 +18,7 @@ on:
 
 jobs:
   analyze:
+    if: false # disabled
     name: analyze
     runs-on: ubuntu-latest
     permissions:

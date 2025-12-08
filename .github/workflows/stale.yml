@@ -11,7 +11,7 @@ on:
 
 jobs:
   stale:
-
+    if: false # disabled
     runs-on: ubuntu-latest
     permissions:
       issues: write

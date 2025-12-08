@@ -15,6 +15,7 @@ permissions:
 
 jobs:
   build:
+    if: false # disabled
     name: Build Docusaurus
     runs-on: ubuntu-latest
     defaults:
