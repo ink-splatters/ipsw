@@ -1,8 +1,9 @@
 name: "WebKitMETA"
 
 on:
-  schedule:
-    - cron: "00 01,13 * * *"
+  workflow_dispatch: # manual only
+  # schedule: # disabled
+  #   - cron: "00 01,13 * * *"
 
 permissions:
   contents: write

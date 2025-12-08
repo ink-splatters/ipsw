@@ -7,10 +7,10 @@ on:
         description: "Skip posting to Social Media"
         required: false
         type: boolean
-  schedule:
-    # - cron: "0 */1 * * *" # every 1 hour
-    - cron: "*/30 * * * *" # every 30 minutes
-    # - cron: "0 0 * * *"
+  # schedule: # disabled
+  #   # - cron: "0 */1 * * *" # every 1 hour
+  #   - cron: "*/30 * * * *" # every 30 minutes
+  #   # - cron: "0 0 * * *"
 
 permissions:
   contents: write

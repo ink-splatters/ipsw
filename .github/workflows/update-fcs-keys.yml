@@ -1,8 +1,8 @@
 name: Update FCS Keys
 
 on:
-  schedule:
-    - cron: "0 19 * * *" # daily at 11:00 PST (19:00 UTC)
+  # schedule: # disabled
+  #   - cron: "0 19 * * *" # daily at 11:00 PST (19:00 UTC)
   workflow_dispatch:
 
 permissions:
