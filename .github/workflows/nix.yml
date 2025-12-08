@@ -3,20 +3,10 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - master
-    paths:
-      - "flake.nix"
-      - "flake.lock"
-      - "nix/**"
-      - ".github/workflows/nix.yml"
+      - dev
   pull_request:
     branches:
-      - master
-    paths:
-      - "flake.nix"
-      - "flake.lock"
-      - "nix/**"
-      - ".github/workflows/nix.yml"
+      - dev
 
 permissions:
   contents: read
