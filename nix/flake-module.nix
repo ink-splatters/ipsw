@@ -17,8 +17,11 @@
     # we remove the attrs we want to override, then re-add them extended with compiler flags
     commonArgsStripped = builtins.removeAttrs config.commonArgs ["CGO_CFLAGS" "CGO_CXXFLAGS" "CGO_LDFLAGS"];
 
-    compileFlags = "-O3 -mcpu=native -flto=thin -Wall -pipe";
-    linkFlags = "-flto=thin -Wl,-dead_strip";
+    # -mcpu=native doesn't work in sandboxed x86_64 CI (clang passes empty -mcpu=)
+    # only use it on Darwin/ARM where it works reliably
+    cpuFlag = lib.optionalString config.stdenv.hostPlatform.isDarwin "-mcpu=native";
+    compileFlags = "-O3 ${cpuFlag} -flto=thin -Wall -pipe";
+    linkFlags = "-flto=thin" + lib.optionalString config.stdenv.hostPlatform.isDarwin " -Wl,-dead_strip";
 
     concatFlags = flags: lib.concatStringsSep " " flags;
   in {
