@@ -38,18 +38,6 @@
       };
     };
 
-    # hooks installer
-    # NOTE: updates to this file are not immediately picked up, remove symlink first:
-    # ```sh
-    # rm .pre-commit-config.yaml && nix run .#install-hooks
-    # ```
-    #
-    # if using nix-direnv, changes to ./nix/dev require refreshing direnv cache:
-    # ```sh
-    # direnv reload
-    # ```
-    # direnv is not installed by this flake, install it with `nix profile add nixpkgs#direnv`
-
     apps.install-hooks = {
       type = "app";
       program = toString (pkgs.writeShellScript "install-hooks" ''
