@@ -22,16 +22,16 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1765934234,
-        "narHash": "sha256-pJjWUzNnjbIAMIc5gRFUuKCDQ9S1cuh3b2hKgA7Mc4A=",
-        "owner": "NixOS",
+        "lastModified": 1765229691,
+        "narHash": "sha256-G+2SnbIDLkwt/c0VWiOUEZDZEufiAfmBy2flwTTJetI=",
+        "owner": "ink-splatters",
         "repo": "nixpkgs",
-        "rev": "af84f9d270d404c17699522fab95bbf928a2d92f",
+        "rev": "2af2e7dad78aac3b9295722f4bcec8983e494434",
         "type": "github"
       },
       "original": {
-        "owner": "NixOS",
-        "ref": "nixpkgs-unstable",
+        "owner": "ink-splatters",
+        "ref": "gradle-temurin+jetbrains-update-m-20251208",
         "repo": "nixpkgs",
         "type": "github"
       }
