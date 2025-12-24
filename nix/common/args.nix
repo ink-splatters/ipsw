@@ -32,7 +32,6 @@
           ];
 
           CGO_CFLAGS = compileFlags;
-          CGO_CXXFLAGS = compileFlags;
           CGO_LDFLAGS = linkFlags;
           GOFLAGS = mkTags [
             "unicorn"
