@@ -6,7 +6,7 @@
       url = "github:hercules-ci/flake-parts";
       inputs.nixpkgs-lib.follows = "nixpkgs";
     };
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    nixpkgs.url = "github:ink-splatters/nixpkgs/gradle-temurin+jetbrains-update-m-20251208";
     systems.url = "github:nix-systems/default";
   };
 
