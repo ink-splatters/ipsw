@@ -1,5 +1,5 @@
 # main flake module which builds `ipsw`
-{lib, ...}: {
+{
   imports = [
     ./config.nix
     ./common
@@ -11,16 +11,17 @@
       CGO_CFLAGS
       CGO_CXXFLAGS
       CGO_LDFLAGS
+      GOFLAGS
       ;
 
     # config.commonArgs is an attrset, not a derivation, so overrideAttrs cannot be used.
     # we remove the attrs we want to override, then re-add them extended with compiler flags
-    commonArgsStripped = builtins.removeAttrs config.commonArgs ["CGO_CFLAGS" "CGO_CXXFLAGS" "CGO_LDFLAGS"];
+    commonArgsStripped = builtins.removeAttrs config.commonArgs ["CGO_CFLAGS" "CGO_CXXFLAGS" "CGO_LDFLAGS" "GOFLAGS"];
 
     compileFlags = "-O3 -mcpu=native -flto=thin -Wall -pipe";
     linkFlags = "-flto=thin -Wl,-dead_strip";
 
-    concatFlags = flags: lib.concatStringsSep " " flags;
+    concatFlags = flags: builtins.toString flags;
   in {
     packages.ipsw = config.toolchain.buildGoModule (commonArgsStripped
       // {
@@ -40,9 +41,12 @@
         hardeningDisable = ["all"];
         NIX_ENFORCE_NO_NATIVE = 0;
 
-        CGO_CFLAGS = concatFlags [CGO_CFLAGS compileFlags];
-        CGO_CXXFLAGS = concatFlags [CGO_CXXFLAGS compileFlags];
-        CGO_LDFLAGS = concatFlags [CGO_LDFLAGS linkFlags];
+        CGO_CFLAGS = concatFlags (CGO_CFLAGS ++ [compileFlags]);
+        CGO_CXXFLAGS = concatFlags (CGO_CXXFLAGS ++ [compileFlags]);
+        CGO_LDFLAGS = concatFlags (CGO_LDFLAGS ++ [linkFlags]);
+        env = {
+          GOFLAGS = concatFlags GOFLAGS;
+        };
 
         # TODO: fine-grained disabling of tests which require network or hardware
         doCheck = false;
