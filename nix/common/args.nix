@@ -19,7 +19,6 @@
           buildInputs = with pkgs;
             [
               libusb1
-              unicorn
             ]
             ++ lib.optionals config.stdenv.hostPlatform.isDarwin [pkgs.apple-sdk_15]
             ++ lib.optionals (frida.dev-kit != null) [frida.dev-kit];
@@ -34,7 +33,6 @@
           CGO_CFLAGS = compileFlags;
           CGO_LDFLAGS = linkFlags;
           GOFLAGS = mkTags [
-            "unicorn"
             (lib.optionalString (frida.dev-kit != null) "frida")
           ];
         };
