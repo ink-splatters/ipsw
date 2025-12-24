@@ -7,6 +7,7 @@
       inputs.nixpkgs-lib.follows = "nixpkgs";
     };
     nixpkgs.url = "github:ink-splatters/nixpkgs/gradle-temurin+jetbrains-update-m-20251208";
+    nixpkgs-2411.url = "github:NixOS/nixpkgs/24.11";
     systems.url = "github:nix-systems/default";
   };
 

@@ -11,7 +11,7 @@
   }: let
     inherit (config) pre-commit;
   in {
-    devShells.default = pkgs.mkShell.override {inherit (config) stdenv;} ({
+    devShells.default = pkgs.mkShell.override {inherit (config.pkgs-2411) stdenv;} ({
         packages = pre-commit.settings.enabledPackages;
 
         shellHook = ''
