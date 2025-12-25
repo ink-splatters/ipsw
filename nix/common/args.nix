@@ -7,7 +7,12 @@
   }: let
     inherit (config) frida;
 
-    compileFlags = lib.optionalString (frida.dev-kit != null) "-I${frida.dev-kit}/include";
+    compileFlags = builtins.toString (
+      lib.optionals (frida.dev-kit != null) ["-I${frida.dev-kit}/include"]
+      ++ [
+        "-DIPSW_SECTRUST_COMPAT"
+      ]
+    );
     linkFlags = lib.optionalString (frida.dev-kit != null) "-L${frida.dev-kit}/lib -lfrida-core";
 
     mkTags = tags: ["-tags=${lib.concatStringsSep "," tags}"];
