@@ -35,6 +35,7 @@
           CGO_LDFLAGS = linkFlags;
           GOFLAGS = mkTags [
             "unicorn"
+            "sectrust_compat"
             (lib.optionalString (frida.dev-kit != null) "frida")
           ];
         };
