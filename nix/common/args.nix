@@ -33,7 +33,7 @@
 
           CGO_CFLAGS = compileFlags;
           CGO_LDFLAGS = linkFlags;
-          GOFLAGS = mkTags [
+          env.GOFLAGS = mkTags [
             "unicorn"
             "sectrust_compat"
             (lib.optionalString (frida.dev-kit != null) "frida")
