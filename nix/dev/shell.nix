@@ -9,15 +9,23 @@
     pkgs,
     ...
   }: let
-    inherit (config) pre-commit;
+    inherit (config) pre-commit commonArgs;
+    GOFLAGS = let
+      inherit (commonArgs.env) GOFLAGS;
+    in
+      builtins.toString GOFLAGS;
   in {
-    devShells.default = pkgs.mkShell.override {inherit (config) stdenv;} ({
+    devShells.default = pkgs.mkShell.override {inherit (config) stdenv;} (builtins.removeAttrs commonArgs ["GOFLAGS"]
+      // {
         packages = pre-commit.settings.enabledPackages;
 
         shellHook = ''
           ${pre-commit.installationScript}
         '';
-      }
-      // config.commonArgs);
+
+        env = {
+          inherit GOFLAGS;
+        };
+      });
   };
 }
