@@ -6,8 +6,26 @@
       url = "github:hercules-ci/flake-parts";
       inputs.nixpkgs-lib.follows = "nixpkgs";
     };
+
+    tailscale-go = {
+      url = "github:ink-splatters/tailscale-go/go1.26rc1+20260104";
+      inputs = {
+        nixpkgs.follows = "nixpkgs";
+        systems.follows = "systems";
+      };
+    };
+
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     systems.url = "github:nix-systems/default";
+  };
+
+  nixConfig = {
+    extra-substituters = [
+      "https://aarch64-darwin.cachix.org"
+    ];
+    extra-trusted-public-keys = [
+      "aarch64-darwin.cachix.org-1:mEz8A1jcJveehs/ZbZUEjXZ65Aukk9bg2kmb0zL9XDA="
+    ];
   };
 
   outputs = inputs @ {flake-parts, ...}:
@@ -15,11 +33,6 @@
       systems = import inputs.systems;
       flakeModules.default = import ./nix/flake-module.nix;
     in {
-      # https://flake.parts/debug.html
-      # debug = true
-
-      # https://nixos.wiki/wiki/NixOS_modules
-      # https://flake.parts/best-practices-for-module-writing.html
       imports = [
         flakeModules.default
         flake-parts.flakeModules.partitions
@@ -27,7 +40,6 @@
 
       inherit systems;
 
-      # see https://flake.parts/options/flake-parts-partitions.html
       partitionedAttrs = {
         apps = "dev";
         checks = "dev";
@@ -35,15 +47,12 @@
         formatter = "dev";
       };
       partitions.dev = {
-        # specifies directory with inputs-only flake.nix
         extraInputsFlake = ./nix/dev;
         module = {
           imports = [./nix/dev];
         };
       };
-      # module defining local flake outputs and config
-      # for definition of "local flake" see:
-      # https://flake.parts/define-module-in-separate-file.html#importapply
+
       perSystem = {
         config,
         lib,
