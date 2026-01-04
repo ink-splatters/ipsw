@@ -1,8 +1,11 @@
-# toolchain configuration, shared between dev and build
 {lib, ...}: {
-  perSystem = {pkgs, ...}: let
-    inherit (pkgs) go_1_25 buildGo125Module;
-    inherit (pkgs.llvmPackages_latest) bintools clang stdenv;
+  perSystem = {
+    inputs',
+    pkgs,
+    ...
+  }: let
+    inherit (inputs'.tailscale-go.packages) go_1_26;
+    inherit (pkgs.llvmPackages_latest) clang bintools stdenv;
   in {
     options = {
       stdenv = lib.mkOption {
@@ -11,12 +14,13 @@
       toolchain = lib.mkOption {
         type = lib.types.attrs;
         default = {
-          # bintools is a nix wrapper for llvm binutils, we use it for lld linker
           inherit bintools clang;
 
-          # use latest go compiler, overriding the nixpkgs default (go_1_24)
-          go = go_1_25;
-          buildGoModule = buildGo125Module.override {inherit stdenv;};
+          go = go_1_26;
+          buildGoModule = pkgs.buildGo126Module.override {
+            inherit stdenv;
+            go = go_1_26;
+          };
         };
       };
     };
