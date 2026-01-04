@@ -1,5 +1,5 @@
 # overrides for nixpkgs.go-tools (a.k.a. https://staticcheck.dev)
-# to build it with go_1_25 (currently built with go_1_24 by default)
+# to build it with our go toolchain
 {lib, ...}: {
   perSystem = {
     config,
@@ -25,6 +25,7 @@
         enableParallelBuilding = true;
         NIX_ENFORCE_NO_NATIVE = 0;
         doCheck = false;
+        hardeningDisable = ["all"];
       });
   };
 }
