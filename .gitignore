@@ -93,3 +93,4 @@ pkg/sandbox/
 
 # git-hooks.nix
 /.pre-commit-config.yaml
+/result
