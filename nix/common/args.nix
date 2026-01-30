@@ -29,7 +29,7 @@
           nativeBuildInputs = with config.toolchain; [
             clang
             bintools
-            go
+            go_1_26
           ];
 
           CGO_CFLAGS = compileFlags;
