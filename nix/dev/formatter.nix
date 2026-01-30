@@ -8,7 +8,7 @@
       ${pkgs.alejandra}/bin/alejandra .
 
       echo "Formatting Go files..."
-      ${config.toolchain.go}/bin/go fmt ./...
+      ${config.toolchain.go_1_26}/bin/go fmt ./...
     '';
   };
 }

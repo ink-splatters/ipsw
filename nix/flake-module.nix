@@ -11,6 +11,7 @@
       CGO_CFLAGS
       CGO_LDFLAGS
       ;
+    inherit (config.toolchain) buildGo126Module;
 
     # config.commonArgs is an attrset, not a derivation, so overrideAttrs cannot be used.
     # we remove the attrs we want to override, then re-add them extended with compiler flags
@@ -21,7 +22,7 @@
 
     concatFlags = flags: lib.concatStringsSep " " flags;
   in {
-    packages.ipsw = config.toolchain.buildGoModule (commonArgsStripped
+    packages.ipsw = buildGo126Module (commonArgsStripped
       // {
         pname = "ipsw";
         inherit (config) src version vendorHash;
