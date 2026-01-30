@@ -1,37 +1,38 @@
-# main flake module which builds `ipsw`
-{lib, ...}: {
+{
   imports = [
     ./config.nix
     ./common
   ];
 
   perSystem = {config, ...}: let
-    inherit
-      (config.commonArgs)
-      CGO_CFLAGS
-      CGO_LDFLAGS
-      ;
-    inherit (config.toolchain) buildGo126Module;
+    inherit (config) commonArgs;
+    inherit (config.commonArgs) buildGo126Module;
 
-    # config.commonArgs is an attrset, not a derivation, so overrideAttrs cannot be used.
-    # we remove the attrs we want to override, then re-add them extended with compiler flags
-    commonArgsStripped = builtins.removeAttrs config.commonArgs ["CGO_CFLAGS" "CGO_LDFLAGS"];
+    commonArgsStripped = builtins.removeAttrs commonArgs ["CGO_CFLAGS" "CGO_LDFLAGS"];
 
-    compileFlags = "-O3 -mcpu=native -flto=thin -Wall -pipe";
-    linkFlags = "-flto=thin -Wl,-dead_strip";
+    CGO_CFLAGS = builtins.toString [
+      commonArgs.CGO_CFLAGS
+      "-O3"
+      "-mcpu=native"
+      "-flto=thin"
+    ];
 
-    concatFlags = flags: lib.concatStringsSep " " flags;
+    CGO_LDFLAGS = builtins.toString [
+      commonArgs.CGO_LDFLAGS
+      "-flto=thin"
+      "-Wl,-dead_strip"
+    ];
+
+    ldflags = [
+      "-s"
+      "-w"
+      "-X github.com/blacktop/ipsw/cmd/ipsw/cmd.AppVersion=${config.version}"
+    ];
   in {
     packages.ipsw = buildGo126Module (commonArgsStripped
       // {
         pname = "ipsw";
         inherit (config) src version vendorHash;
-
-        ldflags = [
-          "-s"
-          "-w"
-          "-X github.com/blacktop/ipsw/cmd/ipsw/cmd.AppVersion=${config.version}"
-        ];
 
         subPackages = ["./cmd/ipsw"];
 
@@ -40,8 +41,7 @@
         hardeningDisable = ["all"];
         NIX_ENFORCE_NO_NATIVE = 0;
 
-        CGO_CFLAGS = concatFlags [CGO_CFLAGS compileFlags];
-        CGO_LDFLAGS = concatFlags [CGO_LDFLAGS linkFlags];
+        inherit CGO_CFLAGS CGO_LDFLAGS ldflags;
 
         # TODO: fine-grained disabling of tests which require network or hardware
         doCheck = false;
