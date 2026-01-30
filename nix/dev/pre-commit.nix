@@ -8,18 +8,6 @@
       check.enable = true;
 
       settings.hooks = {
-        # go linting
-
-        # TODO: `staticcheck` takes time to run and might not provide best `nix develop`
-        # activation experience. either re-enable after fixing codebase issues
-        # (U1000, SA4009, etc.), or remove from hooks and use manually as
-        # `staticcheck ./...` from active `nix develop` shell
-
-        # staticcheck = {
-        #   enable = true;
-        #   package = config.packages.go-tools;
-        # };
-
         # markdown linting
         # TODO: enable and fix the issues
         # markdownlint.enable = true;
