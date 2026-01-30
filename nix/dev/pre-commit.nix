@@ -8,8 +8,6 @@
       check.enable = true;
 
       settings.hooks = {
-        # markdown linting
-        # TODO: enable and fix the issues
         # markdownlint.enable = true;
 
         # nix code linting
@@ -18,25 +16,9 @@
         alejandra.enable = true;
         statix.enable = true;
 
-        # spell checking
-        # TODO: enable, filtering out go files, as it catches some legitimate stuff like "udid".
-        # alternative would be literal exclusion list if supported by the tool
-
         # typos.enable = true;
       };
     };
-
-    # hooks installer
-    # NOTE: updates to this file are not immediately picked up, remove symlink first:
-    # ```sh
-    # rm .pre-commit-config.yaml && nix run .#install-hooks
-    # ```
-    #
-    # if using nix-direnv, changes to ./nix/dev require refreshing direnv cache:
-    # ```sh
-    # direnv reload
-    # ```
-    # direnv is not installed by this flake, install it with `nix profile add nixpkgs#direnv`
 
     apps.install-hooks = {
       type = "app";
