@@ -5,15 +5,12 @@
     ...
   }: let
     inherit (config) pre-commit commonArgs;
-    GOFLAGS = let
-      inherit (commonArgs.env) GOFLAGS;
-    in
-      builtins.toString GOFLAGS;
+    GOFLAGS = builtins.toString commonArgs.env.GOFLAGS;
   in {
     # note that this dev shell doesn't include optimization flags on purpose
     devShells.default =
       pkgs.mkShell.override {inherit (config) stdenv;}
-      (builtins.removeAttrs commonArgs ["GOFLAGS"]
+      (commonArgs
         // {
           packages = pre-commit.settings.enabledPackages;
 

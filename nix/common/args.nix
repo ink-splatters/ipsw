@@ -1,5 +1,7 @@
 # common arguments, shared between dev and build
-{lib, ...}: {
+{lib, ...}: let
+  inherit (lib) concatStringsSep mkOption optionals;
+in {
   perSystem = {
     config,
     pkgs,
@@ -7,13 +9,33 @@
   }: let
     inherit (config) frida;
 
-    compileFlags = lib.optionalString (frida.dev-kit != null) "-I${frida.dev-kit}/include";
-    linkFlags = lib.optionalString (frida.dev-kit != null) "-L${frida.dev-kit}/lib -lfrida-core";
+    CGO_CFLAGS = builtins.toString (optionals (frida.dev-kit != null) [
+        "-I${frida.dev-kit}/include"
+      ]
+      ++ [
+        "-Wall"
+        "-pipe"
+      ]);
 
-    mkTags = tags: ["-tags=${lib.concatStringsSep "," tags}"];
+    CGO_LDFLAGS = builtins.toString (optionals (frida.dev-kit != null) [
+      "-L${frida.dev-kit}/lib -lfrida-core"
+    ]);
+
+    GOFLAGS = let
+      mkTags = tags: ["-tags=${concatStringsSep "," tags}"];
+    in
+      mkTags (
+        optionals (frida.dev-kit != null) [
+          "frida"
+        ]
+        ++ [
+          "unicorn"
+          "sectrust_compat"
+        ]
+      );
   in {
     options = {
-      commonArgs = lib.mkOption {
+      commonArgs = mkOption {
         type = lib.types.attrs;
         default = {
           buildInputs = with pkgs;
@@ -21,8 +43,8 @@
               libusb1
               unicorn
             ]
-            ++ lib.optionals config.stdenv.hostPlatform.isDarwin [pkgs.apple-sdk_15]
-            ++ lib.optionals (frida.dev-kit != null) [frida.dev-kit];
+            ++ optionals config.stdenv.hostPlatform.isDarwin [pkgs.apple-sdk_15]
+            ++ optionals (frida.dev-kit != null) [frida.dev-kit];
 
           env.CGO_ENABLED = 1;
 
@@ -32,13 +54,13 @@
             go_1_26
           ];
 
-          CGO_CFLAGS = compileFlags;
-          CGO_LDFLAGS = linkFlags;
-          env.GOFLAGS = mkTags [
-            "unicorn"
-            "sectrust_compat"
-            (lib.optionalString (frida.dev-kit != null) "frida")
-          ];
+          inherit
+            CGO_CFLAGS
+            CGO_LDFLAGS
+            ;
+          env = {
+            inherit GOFLAGS;
+          };
         };
       };
     };
