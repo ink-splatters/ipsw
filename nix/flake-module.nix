@@ -6,7 +6,7 @@
 
   perSystem = {config, ...}: let
     inherit (config) commonArgs;
-    inherit (config.commonArgs) buildGo126Module;
+    inherit (config.toolchain) buildGo126Module;
 
     commonArgsStripped = builtins.removeAttrs commonArgs ["CGO_CFLAGS" "CGO_LDFLAGS"];
 
