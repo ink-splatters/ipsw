@@ -137,6 +137,8 @@ type credentials struct {
 	Password      string `json:"password,omitempty"`
 	DsPersonID    string `json:"directory_services_id,omitempty"`
 	PasswordToken string `json:"password_token,omitempty"`
+	Pod           string `json:"pod,omitempty"`
+	StoreFront    string `json:"store_front,omitempty"`
 }
 
 type session struct {
@@ -1029,11 +1031,11 @@ func (dp *DevPortal) verifyCode(codeType, code string, phoneID int) error {
 				return fmt.Errorf("failed to deserialize response body JSON: %v", err)
 			}
 			if svcErr.HasError {
-				var errStr string
+				var errStr strings.Builder
 				for _, svcErr := range svcErr.Errors {
-					errStr += fmt.Sprintf(": %s", svcErr.Message)
+					errStr.WriteString(fmt.Sprintf(": %s", svcErr.Message))
 				}
-				return fmt.Errorf("failed to verify code: response received %s%s", response.Status, errStr)
+				return fmt.Errorf("failed to verify code: response received %s%s", response.Status, errStr.String())
 			}
 		}
 
@@ -1072,11 +1074,11 @@ func (dp *DevPortal) trustSession() error {
 				return fmt.Errorf("failed to deserialize response body JSON: %v", err)
 			}
 			if svcErr.HasError {
-				var errStr string
+				var errStr strings.Builder
 				for _, svcErr := range svcErr.Errors {
-					errStr += fmt.Sprintf(": %s", svcErr.Message)
+					errStr.WriteString(fmt.Sprintf(": %s", svcErr.Message))
 				}
-				return fmt.Errorf("failed to update to trusted session: response received %s%s", response.Status, errStr)
+				return fmt.Errorf("failed to update to trusted session: response received %s%s", response.Status, errStr.String())
 			}
 		}
 		return fmt.Errorf("failed to update to trusted session: response received %s", response.Status)

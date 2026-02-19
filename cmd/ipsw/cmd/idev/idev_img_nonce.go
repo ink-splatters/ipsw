@@ -190,16 +190,16 @@ var nonceCmd = &cobra.Command{
 				fmt.Printf("%s %d\n", colors.FaintHiBlue().Sprintf("ApECID:    "), personalID["UniqueChipID"])
 			}
 			fmt.Println(colors.FaintHiBlue().Sprintf("Nonce:"))
-			var out string
+			var out strings.Builder
 			for i, c := range nonce {
 				if i > 0 && i%4 == 0 && i%24 != 0 {
-					out += colors.Faint().Sprint("-")
+					out.WriteString(colors.Faint().Sprint("-"))
 				} else if i > 0 && i%24 == 0 {
-					out += "\n"
+					out.WriteString("\n")
 				}
-				out += colors.Bold().Sprintf("%c", c)
+				out.WriteString(colors.Bold().Sprintf("%c", c))
 			}
-			fmt.Println(out)
+			fmt.Println(out.String())
 		} else {
 			if asJSON {
 				var out []byte

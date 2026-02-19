@@ -1,42 +1,5 @@
 {
   "WebKit/WebKit": {
-    "tags": [
-      "webkitgtk-2.48.3",
-      "wpewebkit-2.48.2",
-      "wpewebkit-2.48.3",
-      "webkitgtk-2.49.2",
-      "wpewebkit-2.49.2",
-      "webkitgtk-2.49.3",
-      "wpewebkit-2.49.3",
-      "wpewebkit-2.48.4",
-      "webkitgtk-2.48.4",
-      "webkitgtk-2.49.4",
-      "wpewebkit-2.49.4",
-      "webkitgtk-2.48.5",
-      "wpewebkit-2.48.5",
-      "webkitgtk-2.49.90",
-      "wpewebkit-2.49.90",
-      "webkitgtk-2.48.6",
-      "wpewebkit-2.48.6",
-      "webkitgtk-2.50.0",
-      "wpewebkit-2.48.7",
-      "webkitgtk-2.48.7",
-      "wpewebkit-2.50.0",
-      "webkitgtk-2.50.1",
-      "webkitgtk-2.51.1",
-      "wpewebkit-2.51.1",
-      "webkitgtk-2.51.2",
-      "wpewebkit-2.51.2",
-      "wpewebkit-2.50.3",
-      "webkitgtk-2.51.3",
-      "wpewebkit-2.51.3",
-      "webkitgtk-2.50.4",
-      "wpewebkit-2.50.4",
-      "webkitgtk-2.51.4",
-      "wpewebkit-2.51.4",
-      "webkitgtk-2.51.90",
-      "wpewebkit-2.51.90"
-    ],
     "commits": [
       "5477c623a01c1fa53b5441103642aa119177402d",
       "f8332133a12b758485dd348da4c6ed991bde98f5",
@@ -85,7 +48,16 @@
       "00b6b38f4c2f624e7763c0431c4bc827730a6661",
       "5ed624178e3d5fabbdc517cc7dcef20aa7016535",
       "590c4d847d469d44479f13a8a4a81ecb5cfa45e9",
-      "14c45011e5296bfd300b40c8abaa9ffd740e4348"
+      "14c45011e5296bfd300b40c8abaa9ffd740e4348",
+      "4895f35302d070075756b77cc3e24ce2644cd53b",
+      "5c83f9e361aaf4f568265bd09fdbb7ca8f653964",
+      "be78cc29552b7770908777e3741bbe9250d34281",
+      "1b4dd17f517a1ecb3db037ca6bc588f946b28c56",
+      "ea7d159a45e544d013234dec9c56760129dcc8c0",
+      "83325357defece004a6b6e272e66cdcd57b37530",
+      "c8ce02dc63f10941e3b126425003fb80fcb7aa05",
+      "121c09c9c8f30b7a66c03356dd9dfad92c82740d",
+      "aae6a13f406fe29df1873f31f6f3e801dbf32e26"
     ],
     "fcs_keys": {
       "beta": {
@@ -97,9 +69,60 @@
       "release": {
         "updated_at": "0001-01-01T00:00:00Z"
       }
-    }
+    },
+    "tags": [
+      "webkitgtk-2.48.3",
+      "wpewebkit-2.48.2",
+      "wpewebkit-2.48.3",
+      "webkitgtk-2.49.2",
+      "wpewebkit-2.49.2",
+      "webkitgtk-2.49.3",
+      "wpewebkit-2.49.3",
+      "wpewebkit-2.48.4",
+      "webkitgtk-2.48.4",
+      "webkitgtk-2.49.4",
+      "wpewebkit-2.49.4",
+      "webkitgtk-2.48.5",
+      "wpewebkit-2.48.5",
+      "webkitgtk-2.49.90",
+      "wpewebkit-2.49.90",
+      "webkitgtk-2.48.6",
+      "wpewebkit-2.48.6",
+      "webkitgtk-2.50.0",
+      "wpewebkit-2.48.7",
+      "webkitgtk-2.48.7",
+      "wpewebkit-2.50.0",
+      "webkitgtk-2.50.1",
+      "webkitgtk-2.51.1",
+      "wpewebkit-2.51.1",
+      "webkitgtk-2.51.2",
+      "wpewebkit-2.51.2",
+      "wpewebkit-2.50.3",
+      "webkitgtk-2.51.3",
+      "wpewebkit-2.51.3",
+      "webkitgtk-2.50.4",
+      "wpewebkit-2.50.4",
+      "webkitgtk-2.51.4",
+      "wpewebkit-2.51.4",
+      "webkitgtk-2.51.90",
+      "wpewebkit-2.51.90",
+      "webkitgtk-2.51.91",
+      "wpewebkit-2.51.91",
+      "wpewebkit-2.50.5"
+    ]
   },
   "apple-oss-distributions/distribution-macOS": {
+    "fcs_keys": {
+      "beta": {
+        "updated_at": "0001-01-01T00:00:00Z"
+      },
+      "rc": {
+        "updated_at": "0001-01-01T00:00:00Z"
+      },
+      "release": {
+        "updated_at": "0001-01-01T00:00:00Z"
+      }
+    },
     "tags": [
       "macos-155",
       "macos-154",
@@ -107,18 +130,7 @@
       "macos-260",
       "macos-261",
       "macos-262"
-    ],
-    "fcs_keys": {
-      "beta": {
-        "updated_at": "0001-01-01T00:00:00Z"
-      },
-      "rc": {
-        "updated_at": "0001-01-01T00:00:00Z"
-      },
-      "release": {
-        "updated_at": "0001-01-01T00:00:00Z"
-      }
-    }
+    ]
   },
   "fcs_keys": {
     "fcs_keys": {
@@ -136,38 +148,37 @@
   "fcs_keys_beta": {
     "fcs_keys": {
       "beta": {
-        "fingerprint": "23D5114d_25D5112c_23N5613b",
-        "ios_build": "23D5114d",
-        "macos_build": "25D5112c",
-        "visionos_build": "23N5613b",
-        "updated_at": "2026-01-27T19:11:38Z"
-      },
-      "rc": {
-        "updated_at": "0001-01-01T00:00:00Z"
-      },
-      "release": {
-        "updated_at": "0001-01-01T00:00:00Z"
+        "fingerprint": "23E5207q_25E5207k_23O5209m",
+        "ios_build": "23E5207q",
+        "macos_build": "25E5207k",
+        "updated_at": "2026-02-16T19:16:32Z",
+        "visionos_build": "23O5209m"
       }
     }
   },
   "fcs_keys_rc": {
     "fcs_keys": {
-      "beta": {
-        "updated_at": "0001-01-01T00:00:00Z"
-      },
       "rc": {
-        "fingerprint": "23C71_21H1320_23N301",
-        "ios_build": "23C71",
-        "macos_build": "21H1320",
-        "visionos_build": "23N301",
-        "updated_at": "2026-01-26T19:11:34Z"
-      },
-      "release": {
-        "updated_at": "0001-01-01T00:00:00Z"
+        "fingerprint": "23D127_25D125_23N620",
+        "ios_build": "23D127",
+        "macos_build": "25D125",
+        "updated_at": "2026-02-18T19:23:27Z",
+        "visionos_build": "23N620"
       }
     }
   },
   "fcs_keys_stable": {
+    "fcs_keys": {
+      "release": {
+        "fingerprint": "23D127_25D125_23N620",
+        "ios_build": "23D127",
+        "macos_build": "25D125",
+        "updated_at": "2026-02-18T19:23:27Z",
+        "visionos_build": "23N620"
+      }
+    }
+  },
+  "latest_ipsw": {
     "fcs_keys": {
       "beta": {
         "updated_at": "0001-01-01T00:00:00Z"
@@ -176,17 +187,9 @@
         "updated_at": "0001-01-01T00:00:00Z"
       },
       "release": {
-        "fingerprint": "23C71_21H1320_23N301",
-        "ios_build": "23C71",
-        "macos_build": "21H1320",
-        "visionos_build": "23N301",
-        "updated_at": "2026-01-26T19:11:34Z"
+        "updated_at": "0001-01-01T00:00:00Z"
       }
-    }
-  },
-  "latest_ipsw": {
-    "ios_url": "https://updates.cdn-apple.com/2025FallFCS/fullrestores/047-34169/C32FC87E-E6D2-47D1-915A-EC741FE24B6E/iPhone17,1_26.2.1_23C71_Restore.ipsw",
-    "macos_url": "https://updates.cdn-apple.com/2025FallFCS/fullrestores/093-37399/E144C918-CF99-4BBC-B1D0-3E739B9A3F2D/UniversalMac_26.2_25C56_Restore.ipsw",
-    "url": "https://updates.cdn-apple.com/2025FallFCS/fullrestores/047-34169/C32FC87E-E6D2-47D1-915A-EC741FE24B6E/iPhone17,1_26.2.1_23C71_Restore.ipsw"
+    },
+    "url": "https://updates.cdn-apple.com/2026WinterFCS/fullrestores/047-53989/8683F123-A494-4419-82A9-DE287B1B281D/iPhone17,1_26.3_23D127_Restore.ipsw"
   }
 }
