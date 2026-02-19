@@ -1,11 +1,9 @@
 {lib, ...}: {
   perSystem = {
-    inputs',
     pkgs,
     ...
   }: let
-    inherit (pkgs) llvmPackages_latest buildGo126Module;
-    inherit (inputs'.tailscale-go.packages) go_1_26;
+    inherit (pkgs) go_1_26 llvmPackages_latest buildGo126Module;
     inherit (llvmPackages_latest) clang bintools stdenv;
   in {
     options = {
@@ -17,7 +15,6 @@
         default = {
           inherit bintools clang;
 
-          inherit go_1_26;
           buildGo126Module = buildGo126Module.override {
             inherit stdenv;
             go = go_1_26;
