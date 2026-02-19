@@ -8,6 +8,7 @@ in {
     ...
   }: let
     inherit (config) frida;
+    inherit (pkgs) go_1_26;
 
     CGO_CFLAGS = builtins.toString (optionals (frida.dev-kit != null) [
         "-I${frida.dev-kit}/include"
