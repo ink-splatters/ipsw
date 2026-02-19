@@ -7,14 +7,6 @@
       inputs.nixpkgs-lib.follows = "nixpkgs";
     };
 
-    tailscale-go = {
-      url = "github:ink-splatters/tailscale-go/go1.26rc2+20260130";
-      inputs = {
-        nixpkgs.follows = "nixpkgs";
-        systems.follows = "systems";
-      };
-    };
-
     nixpkgs.url = "github:NixOS/nixpkgs/70801e06d9730c4f1704fbd3bbf5b8e11c03a2a7";
     systems.url = "github:nix-systems/default";
   };
