@@ -1,6 +1,6 @@
 {
-  "version": "3.1.649+20260130",
-  "vendorHash": "sha256-QvwVnLAYCrvEELa4HEr1XphjoM7HfqT531eVzZvZVlk=",
+  "version": "3.1.652",
+  "vendorHash": "sha256-BzJCaL3qy79bCwQjXkcO17a38vmx8QwQlELYY1OItwM=",
   "frida": {
     "version": "17.7.3",
     "sources": {
