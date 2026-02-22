@@ -135,7 +135,7 @@ var swiftDumpCmd = &cobra.Command{
 			Interface:   viper.GetBool("swift-dump.interface"),
 			Deps:        viper.GetBool("swift-dump.deps"),
 			Demangle:    doDemangle,
-			IpswVersion: fmt.Sprintf("Version: %s, BuildCommit: %s", strings.TrimSpace(AppVersion), strings.TrimSpace(AppBuildCommit)),
+			IpswVersion: ipswVersionString(),
 			Color:       colors.Active(),
 			Theme:       viper.GetString("swift-dump.theme"),
 			Output:      viper.GetString("swift-dump.output"),

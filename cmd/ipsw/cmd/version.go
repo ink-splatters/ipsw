@@ -23,7 +23,6 @@ package cmd
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -38,6 +37,6 @@ var versionCmd = &cobra.Command{
 	Aliases: []string{"v"},
 	Short:   "Print the version number of ipsw",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("Version: %s, BuildCommit: %s\n", strings.TrimSpace(AppVersion), strings.TrimSpace(AppBuildCommit))
+		fmt.Println(ipswVersionString())
 	},
 }
