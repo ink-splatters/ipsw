@@ -26,7 +26,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/apex/log"
@@ -157,7 +156,7 @@ var classDumpCmd = &cobra.Command{
 			Deps:     viper.GetBool("class-dump.deps"),
 			// Generic:     viper.GetBool("class-dump.generic"),
 			Demangle:    demangleOpt,
-			IpswVersion: fmt.Sprintf("Version: %s, BuildCommit: %s", strings.TrimSpace(AppVersion), strings.TrimSpace(AppBuildCommit)),
+			IpswVersion: ipswVersionString(),
 			Color:       colors.Active(),
 			Theme:       viper.GetString("class-dump.theme"),
 			Output:      viper.GetString("class-dump.output"),
