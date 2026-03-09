@@ -8,7 +8,8 @@
     };
 
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    systems.url = "github:nix-systems/default";
+    # no x86_64-darwin
+    systems.url = "github:ink-splatters/default-systems";
   };
 
   nixConfig = {
