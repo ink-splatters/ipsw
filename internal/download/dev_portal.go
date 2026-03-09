@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto"
 	"crypto/sha1"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -382,11 +381,8 @@ func NewDevPortal(config *DevConfig) *DevPortal {
 
 	dp := DevPortal{
 		Client: &http.Client{
-			Jar: jar,
-			Transport: &http.Transport{
-				Proxy:           GetProxy(config.Proxy),
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: config.Insecure},
-			},
+			Jar:       jar,
+			Transport: newAppleHTTPTransport(config.Proxy, config.Insecure),
 		},
 		config: config,
 	}
@@ -965,20 +961,20 @@ func (dp *DevPortal) requestCode(phoneID int) error {
 	}
 
 	if 200 > response.StatusCode || 300 <= response.StatusCode {
-		var errStr string
+		var errStr strings.Builder
 		if dp.codeRequest.ServiceErrors != nil {
 			for _, svcErr := range dp.codeRequest.ServiceErrors {
-				errStr += fmt.Sprintf(": %s", svcErr.Message)
+				errStr.WriteString(fmt.Sprintf(": %s", svcErr.Message))
 			}
-			return fmt.Errorf("failed to verify code: response received %s%s", response.Status, errStr)
+			return fmt.Errorf("failed to verify code: response received %s%s", response.Status, errStr.String())
 		}
 
 		if response.StatusCode == 423 { // code rate limiting
-			log.Error(errStr)
+			log.Error(errStr.String())
 			return nil
 		}
 
-		return fmt.Errorf("failed to verify code: response received %s%s", response.Status, errStr)
+		return fmt.Errorf("failed to verify code: response received %s%s", response.Status, errStr.String())
 	}
 
 	return nil
