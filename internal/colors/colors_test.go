@@ -5,22 +5,33 @@ import (
 	"testing"
 
 	"github.com/fatih/color"
+	"github.com/spf13/viper"
 )
+
+func setColorFlags(t *testing.T, forceColor, noColor bool) {
+	t.Helper()
+	viper.Set("color", forceColor)
+	viper.Set("no-color", noColor)
+	t.Cleanup(func() {
+		viper.Set("color", false)
+		viper.Set("no-color", false)
+	})
+}
 
 func TestInit_ForceOn(t *testing.T) {
 	// Save and restore original state
 	orig := color.NoColor
 	defer func() { color.NoColor = orig }()
 
+	setColorFlags(t, true, false)
 	color.NoColor = true // start disabled
-	forceOn := true
-	Init(&forceOn)
+	Init()
 
 	if color.NoColor {
-		t.Error("expected colors enabled when Init(true)")
+		t.Error("expected colors enabled when --color is set")
 	}
-	if !Enabled() {
-		t.Error("Enabled() should return true")
+	if !Active() {
+		t.Error("Active() should return true")
 	}
 }
 
@@ -28,34 +39,35 @@ func TestInit_ForceOff(t *testing.T) {
 	orig := color.NoColor
 	defer func() { color.NoColor = orig }()
 
+	setColorFlags(t, false, true)
 	color.NoColor = false // start enabled
-	forceOff := false
-	Init(&forceOff)
+	Init()
 
 	if !color.NoColor {
-		t.Error("expected colors disabled when Init(false)")
+		t.Error("expected colors disabled when --no-color is set")
 	}
-	if Enabled() {
-		t.Error("Enabled() should return false")
+	if Active() {
+		t.Error("Active() should return false")
 	}
 }
 
-func TestInit_Nil_KeepsExisting(t *testing.T) {
+func TestInit_WithoutOverridesKeepsExistingTTYDetection(t *testing.T) {
 	orig := color.NoColor
 	defer func() { color.NoColor = orig }()
 
+	setColorFlags(t, false, false)
 	// Test with colors enabled
 	color.NoColor = false
-	Init(nil)
+	Init()
 	if color.NoColor {
-		t.Error("Init(nil) should not change NoColor when it was false")
+		t.Error("Init() should not disable colors when auto-detection already enabled them")
 	}
 
 	// Test with colors disabled
 	color.NoColor = true
-	Init(nil)
+	Init()
 	if !color.NoColor {
-		t.Error("Init(nil) should not change NoColor when it was true")
+		t.Error("Init() should not enable colors when auto-detection already disabled them")
 	}
 }
 
@@ -65,7 +77,9 @@ func TestColorOutput_Enabled(t *testing.T) {
 
 	color.NoColor = false
 
-	result := Bold().Sprint("test")
+	c := Bold()
+	c.EnableColor()
+	result := c.Sprint("test")
 	if !strings.Contains(result, "\x1b[") {
 		t.Errorf("expected ANSI codes when colors enabled, got: %q", result)
 	}
@@ -175,6 +189,7 @@ func TestNew(t *testing.T) {
 		t.Fatal("New() returned nil")
 	}
 
+	c.EnableColor()
 	result := c.Sprint("test")
 	if !strings.Contains(result, "\x1b[") {
 		t.Errorf("New() color should produce ANSI codes, got: %q", result)
