@@ -9,7 +9,7 @@
 
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     # no x86_64-darwin
-    systems.url = "github:ink-splatters/default-systems";
+    systems.url = "github:ink-splatters/nix-systems";
   };
 
   nixConfig = {

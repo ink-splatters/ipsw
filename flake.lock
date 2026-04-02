@@ -48,13 +48,13 @@
         "lastModified": 1772905812,
         "narHash": "sha256-uuanbkFk8a313Zfrxdcz8Us/yQtaxNnKJtX8v0ZPpd8=",
         "owner": "ink-splatters",
-        "repo": "default-systems",
+        "repo": "nix-systems",
         "rev": "29e147264c82178afdbd7c83d5429bd0925f8883",
         "type": "github"
       },
       "original": {
         "owner": "ink-splatters",
-        "repo": "default-systems",
+        "repo": "nix-systems",
         "type": "github"
       }
     }
