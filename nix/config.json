@@ -1,5 +1,5 @@
 {
-  "version": "3.1.671+20260420",
+  "version": "3.1.694+20260617",
   "vendorHash": "sha256-r3BvjzK0ISGWMv8BBH3ZeLHx3o+MDdeDETSgZjXPC0U=",
   "frida": {
     "version": "17.14.1",
