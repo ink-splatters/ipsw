@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -138,13 +139,22 @@ func TestRenderHTMLIncludesIBootFilesAndFeatureFlags(t *testing.T) {
 			"IPSW": {"Firmware/old.im4p"},
 		},
 	}
-	d.Features = &PlistDiff{
-		New: map[string]string{
-			"/System/Library/FeatureFlags/Test.plist": "<plist><dict><key>Enabled</key><true/></dict></plist>",
+	d.Features = map[string]*PlistDiff{
+		"SystemOS": {
+			New: map[string]string{
+				"/System/Library/FeatureFlags/Test.plist": "<plist><dict><key>Enabled</key><true/></dict></plist>",
+			},
+			Removed: []string{"/System/Library/FeatureFlags/Old.plist"},
+			Updated: map[string]string{
+				"/System/Library/FeatureFlags/Changed.plist": "```diff\n- old\n+ new\n```",
+			},
 		},
-		Removed: []string{"/System/Library/FeatureFlags/Old.plist"},
-		Updated: map[string]string{
-			"/System/Library/FeatureFlags/Changed.plist": "```diff\n- old\n+ new\n```",
+	}
+	d.Localizations = map[string]*PlistDiff{
+		"SystemOS": {
+			Updated: map[string]string{
+				"FileSystem/System/Library/PrivateFrameworks/CommunicationsFilter.framework/CommunicationsFilter.loctable": "```diff\n+en.BLOCKLIST_LIMIT_ALERT_TITLE = \"Blocked Contacts Limit Reached\"\n```",
+			},
 		},
 	}
 	rendered := mustRenderHTML(t, d)
@@ -153,12 +163,100 @@ func TestRenderHTMLIncludesIBootFilesAndFeatureFlags(t *testing.T) {
 		`id="iboot"`,
 		`id="files"`,
 		`id="feature-flags"`,
+		`id="localizations"`,
+		`<h5>CommunicationsFilter</h5>`,
 		`new-symbol`,
 		`System/Library/NewFile`,
 		`Changed.plist`,
+		`BLOCKLIST_LIMIT_ALERT_TITLE`,
 	} {
 		if !strings.Contains(rendered, needle) {
 			t.Fatalf("rendered HTML missing %q", needle)
+		}
+	}
+}
+
+func TestRenderHTMLIncludesSandboxProfiles(t *testing.T) {
+	d := newHTMLTestDiff("Test Diff")
+	d.Sandbox = "### Collection\n\n#### Changed (1)\n\n##### locationd\n\n```diff\n-(deny default)\n+(allow default)\n```\n"
+
+	rendered := mustRenderHTML(t, d)
+
+	for _, needle := range []string{
+		`href="#sandbox-profiles"`,
+		`id="sandbox-profiles"`,
+		`locationd`,
+		`class="diff-add"`,
+		`class="diff-del"`,
+	} {
+		if !strings.Contains(rendered, needle) {
+			t.Fatalf("rendered HTML missing %q", needle)
+		}
+	}
+}
+
+func TestStringIncludesSandboxProfiles(t *testing.T) {
+	d := newHTMLTestDiff("Test Diff")
+	d.Sandbox = "### Collection\n\n#### New (1)\n\n##### locationd\n\n```scheme\n(version 1)\n```\n"
+
+	rendered := d.String()
+
+	for _, needle := range []string{
+		"## Sandbox Profiles",
+		"### Collection",
+		"##### locationd",
+	} {
+		if !strings.Contains(rendered, needle) {
+			t.Fatalf("rendered Markdown missing %q", needle)
+		}
+	}
+}
+
+func TestJSONIncludesSandboxProfiles(t *testing.T) {
+	d := newHTMLTestDiff("Test Diff")
+	d.Sandbox = "### Collection\n\n#### Changed (1)\n"
+
+	data, err := json.Marshal(d)
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	if !strings.Contains(string(data), `"sandbox"`) {
+		t.Fatalf("JSON missing sandbox field: %s", data)
+	}
+}
+
+func TestRenderSandboxProfileDiffMarkdown(t *testing.T) {
+	oldDocs := sandboxProfileDocuments{
+		sandboxDiffSourceCollection: {
+			"locationd": "(version 1)\n(deny default)\n",
+			"removed":   "(version 1)\n",
+		},
+	}
+	newDocs := sandboxProfileDocuments{
+		sandboxDiffSourceCollection: {
+			"locationd": "(version 1)\n(allow default)\n",
+			"added":     "(version 1)\n(deny default)\n",
+		},
+	}
+
+	rendered, err := renderSandboxProfileDiffMarkdown(oldDocs, newDocs)
+	if err != nil {
+		t.Fatalf("renderSandboxProfileDiffMarkdown returned error: %v", err)
+	}
+
+	for _, needle := range []string{
+		"### Collection",
+		"#### New (1)",
+		"##### added",
+		"#### Removed (1)",
+		"##### removed",
+		"#### Changed (1)",
+		"##### locationd",
+		"+(allow default)",
+		"-(deny default)",
+	} {
+		if !strings.Contains(rendered, needle) {
+			t.Fatalf("rendered sandbox diff missing %q:\n%s", needle, rendered)
 		}
 	}
 }

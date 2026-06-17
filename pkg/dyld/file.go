@@ -96,15 +96,25 @@ type File struct {
 	objcOpt         Optimization
 	objcOptOnce     sync.Once
 	objcOptErr      error
+	rsBaseOnce      sync.Once
+	rsBase          uint64
+	rsBaseErr       error
 	islandStubs     map[uint64]uint64
 	prewarmData     *PrewarmingHeader
 	size            int64
+	path            string // on-disk path of the main cache file (set by Open)
 
 	r       map[mtypes.UUID]io.ReaderAt
 	closers map[mtypes.UUID]io.Closer
 
 	// sortedImages is Images sorted by LoadAddress for O(log N) binary search
 	sortedImages []*CacheImage
+}
+
+// Name returns the on-disk path of the main cache file, or "" if the File was
+// created without one (e.g. via NewFile).
+func (f *File) Name() string {
+	return f.path
 }
 
 // FormatError is returned by some operations if the data does
@@ -160,6 +170,7 @@ func Open(name string) (*File, error) {
 	}
 
 	ff.size = size
+	ff.path = name
 
 	if ff.IsDyld4 {
 
@@ -780,6 +791,30 @@ func (f *File) ParseStubIslands() error {
 		}
 	}
 	return nil
+}
+
+// GetStubIslandPointerSlots returns pointer slots keyed by stub-island entry point.
+func (f *File) GetStubIslandPointerSlots() (map[uint64]uint64, error) {
+	slots := make(map[uint64]uint64)
+	for _, sc := range f.SubCacheInfo {
+		for _, mapping := range f.MappingsWithSlideInfo[sc.UUID] {
+			if !mapping.Flags.IsTextStubs() {
+				continue
+			}
+			dat := make([]byte, f.Headers[sc.UUID].CodeSignatureOffset-0x4000)
+			if _, err := f.r[sc.UUID].ReadAt(dat, 0x4000); err != nil {
+				return nil, fmt.Errorf("GetStubIslandPointerSlots: failed to read stub island data: %v", err)
+			}
+			stubs, err := disass.ParseStubsASM(dat, mapping.Address+0x4000, func(u uint64) (uint64, error) {
+				return u, nil
+			})
+			if err != nil {
+				return nil, fmt.Errorf("GetStubIslandPointerSlots: failed to parse stub island assembly: %v", err)
+			}
+			maps.Copy(slots, stubs)
+		}
+	}
+	return slots, nil
 }
 
 func (f *File) ParsePrewarmData() error {

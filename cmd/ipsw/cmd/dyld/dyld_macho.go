@@ -310,7 +310,7 @@ var MachoCmd = &cobra.Command{
 									}
 								}
 								if doDemangle {
-									if strings.HasPrefix(sym.Name, "_$s") || strings.HasPrefix(sym.Name, "$s") {
+									if swift.IsMangled(sym.Name) {
 										m.Symtab.Syms[idx].Name, _ = swift.Demangle(sym.Name)
 									} else if strings.HasPrefix(sym.Name, "__Z") || strings.HasPrefix(sym.Name, "_Z") {
 										m.Symtab.Syms[idx].Name = demangle.Do(sym.Name, false, false)
@@ -384,13 +384,13 @@ var MachoCmd = &cobra.Command{
 								} else if strings.HasPrefix(sym.Name, "_symbolic ") {
 									if _, rest, ok := strings.Cut(sym.Name, "_symbolic "); ok {
 										rest = strings.TrimPrefix(rest, "_____ ")
-										if !strings.HasPrefix(rest, "$s") && !strings.HasPrefix(rest, "_$s") {
+										if !swift.IsMangled(rest) {
 											rest = "_$s" + rest
 										}
 										sym.Name, _ = swift.Demangle(rest)
 										sym.Name = "_symbolic " + sym.Name
 									}
-								} else if strings.HasPrefix(sym.Name, "_$s") || strings.HasPrefix(sym.Name, "$s") { // TODO: better detect swift symbols
+								} else if swift.IsMangled(sym.Name) {
 									sym.Name, _ = swift.Demangle(sym.Name)
 								} else {
 									sym.Name = demangle.Do(sym.Name, false, false)
@@ -425,7 +425,10 @@ var MachoCmd = &cobra.Command{
 						}
 						for _, export := range exports {
 							if export.Flags.ReExport() {
-								export.FoundInDylib = m.ImportedLibraries()[export.Other-1]
+								export.FoundInDylib, err = reexportLibraryName(m.ImportedLibraries(), export.Other)
+								if err != nil {
+									return err
+								}
 								reimg, err := f.Image(export.FoundInDylib)
 								if err != nil {
 									return err
@@ -435,7 +438,7 @@ var MachoCmd = &cobra.Command{
 								}
 							}
 							if doDemangle {
-								if strings.HasPrefix(export.Name, "_$s") || strings.HasPrefix(export.Name, "$s") { // TODO: better detect swift symbols
+								if swift.IsMangled(export.Name) {
 									export.Name, _ = swift.Demangle(export.Name)
 								} else {
 									export.Name = demangle.Do(export.Name, false, false)
@@ -615,4 +618,11 @@ var MachoCmd = &cobra.Command{
 
 		return nil
 	},
+}
+
+func reexportLibraryName(importedLibraries []string, ordinal uint64) (string, error) {
+	if ordinal == 0 || ordinal > uint64(len(importedLibraries)) {
+		return "", fmt.Errorf("re-export ordinal %d outside imported library table with %d entries", ordinal, len(importedLibraries))
+	}
+	return importedLibraries[int(ordinal)-1], nil
 }

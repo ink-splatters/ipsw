@@ -22,7 +22,6 @@ THE SOFTWARE.
 package download
 
 import (
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -39,6 +38,7 @@ import (
 	"github.com/blacktop/ipsw/internal/utils"
 	"github.com/blacktop/ipsw/pkg/plist"
 	"github.com/charmbracelet/bubbles/progress"
+	"github.com/fatih/color"
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -55,6 +55,7 @@ func init() {
 	// Command-specific flags
 	downloadPccCmd.Flags().BoolP("info", "i", false, "Show PCC Release info")
 	downloadPccCmd.Flags().String("version", "", "Filter by OS ProductVersion prefix (e.g. 26.3); resolved via partial-zip, cached")
+	downloadPccCmd.Flags().String("os-build", "", "Filter by OS ProductBuildVersion prefix (e.g. 23E5207q); resolved via partial-zip, cached")
 	downloadPccCmd.Flags().String("build", "", "Filter by cloudOS build version prefix (e.g. 5E, 5E290)")
 	downloadPccCmd.Flags().String("train", "", "Filter by cloudOS build train substring (e.g. LuckE)")
 	downloadPccCmd.Flags().String("app", "", "Filter by cloudOS application name (e.g. TIE, 'TIE Proxy')")
@@ -70,6 +71,7 @@ func init() {
 	// Bind command-specific flags
 	viper.BindPFlag("download.pcc.info", downloadPccCmd.Flags().Lookup("info"))
 	viper.BindPFlag("download.pcc.version", downloadPccCmd.Flags().Lookup("version"))
+	viper.BindPFlag("download.pcc.os-build", downloadPccCmd.Flags().Lookup("os-build"))
 	viper.BindPFlag("download.pcc.build", downloadPccCmd.Flags().Lookup("build"))
 	viper.BindPFlag("download.pcc.train", downloadPccCmd.Flags().Lookup("train"))
 	viper.BindPFlag("download.pcc.app", downloadPccCmd.Flags().Lookup("app"))
@@ -95,6 +97,9 @@ var downloadPccCmd = &cobra.Command{
 		# Filter by cloudOS build prefix and pick interactively
 		❯ ipsw download pcc --build 5E --app TIE
 
+		# Filter by OS BuildManifest ProductBuildVersion prefix
+		❯ ipsw download pcc --os-build 23E5207q --info
+
 		# Download PCC VM files interactively
 		❯ ipsw download pcc
 
@@ -111,6 +116,7 @@ var downloadPccCmd = &cobra.Command{
 		// resumeAll := viper.GetBool("download.pcc.resume-all")
 		// restartAll := viper.GetBool("download.pcc.restart-all")
 		versionFilter := viper.GetString("download.pcc.version")
+		osBuildFilter := viper.GetString("download.pcc.os-build")
 		buildFilter := viper.GetString("download.pcc.build")
 		trainFilter := viper.GetString("download.pcc.train")
 		appFilter := viper.GetString("download.pcc.app")
@@ -178,16 +184,24 @@ var downloadPccCmd = &cobra.Command{
 			releases = filtered
 		}
 
-		// Version filter requires network on first use; runs after the cheap
-		// metadata filters so we resolve as few URLs as possible.
-		var versions map[string]download.PCCVersion
-		if versionFilter != "" {
-			versions = download.ResolvePCCVersions(releases, pccVersionFetcher(proxy, insecure))
+		// OS version/build filters require network on first use; run after
+		// the cheap metadata filters so we resolve as few URLs as possible.
+		// Resolution attaches PCCVersion to each release in-place and
+		// persists to the unified pcc_log.json cache.
+		if versionFilter != "" || osBuildFilter != "" {
+			download.ResolvePCCVersions(releases, pccVersionFetcher(proxy, insecure))
 			filtered := releases[:0]
 			for _, r := range releases {
-				if v, ok := versions[path.Base(r.OSAssetURL())]; ok && strings.HasPrefix(v.Version, versionFilter) {
-					filtered = append(filtered, r)
+				if r.Version == nil {
+					continue
 				}
+				if versionFilter != "" && !strings.HasPrefix(r.Version.Version, versionFilter) {
+					continue
+				}
+				if osBuildFilter != "" && !strings.HasPrefix(r.Version.Build, osBuildFilter) {
+					continue
+				}
+				filtered = append(filtered, r)
 			}
 			releases = filtered
 		}
@@ -195,7 +209,7 @@ var downloadPccCmd = &cobra.Command{
 		// Log index does not track chronology — releases can be appended out
 		// of build order. Sort by the metadata timestamp so newest is first.
 		sort.Slice(releases, func(i, j int) bool {
-			return releases[i].GetTimestamp().AsTime().After(releases[j].GetTimestamp().AsTime())
+			return releases[i].ReleaseCreationTime().After(releases[j].ReleaseCreationTime())
 		})
 
 		if len(releases) == 0 {
@@ -204,27 +218,38 @@ var downloadPccCmd = &cobra.Command{
 
 		if viper.GetBool("download.pcc.info") {
 			log.Infof("Found %d PCC Releases", len(releases))
+			// Warm BuildManifest ProductVersion/ProductBuildVersion so the
+			// cloudOS agent build line can include the OS build next to it.
+			download.ResolvePCCVersions(releases, pccVersionFetcher(proxy, insecure))
+			// Resolve any releases whose VPhone hasn't been populated yet from
+			// the cache; new entries since the last run pay the partial-zip
+			// cost once and persist the result.
+			download.ResolveVPhoneFirmware(releases, pccVPhoneFetcher(proxy, insecure))
 			for i := range releases {
 				release := releases[i]
 				fmt.Println(" ╭╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴")
 				fmt.Println(release)
-				if v, ok := versions[path.Base(release.OSAssetURL())]; ok {
-					utils.Indent(log.WithFields(log.Fields{"version": v.Version, "build": v.Build}).Info, 1)("OS IPSW")
+				if release.Version != nil {
+					utils.Indent(log.WithFields(pccVersionFields(*release.Version)).Info, 1)("OS IPSW")
 				} else if len(releases) == 1 {
 					if v, err := pccVersionFetcher(proxy, insecure)(release.OSAssetURL()); err == nil {
-						utils.Indent(log.WithFields(log.Fields{"version": v.Version, "build": v.Build}).Info, 1)("OS IPSW")
+						utils.Indent(log.WithFields(pccVersionFields(v)).Info, 1)("OS IPSW")
 					}
 				}
+				printVPhoneBanner(release.VRE(), release.VPhone)
 				fmt.Println(" ╰╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴╴")
 			}
 		} else {
+			// Picker reads what's already in the cache via release.VPhone —
+			// no network calls. Uncached releases show a blank tag; run
+			// --info once to warm the cache for next time.
 			var choices []string
 			for i := range releases {
 				r := releases[i]
 				build, train, app := r.CloudOSInfo()
 				label := build
-				if v, ok := versions[path.Base(r.OSAssetURL())]; ok {
-					label = v.Version + " " + build
+				if r.Version != nil {
+					label = r.Version.Version + " " + build
 				}
 				if train != "" {
 					label += " (" + train + ")"
@@ -233,12 +258,13 @@ var downloadPccCmd = &cobra.Command{
 					label += "  " + app
 				}
 				if label == "" {
-					label = hex.EncodeToString(r.GetReleaseHash())
+					label = r.ReleaseID()
 				}
-				choices = append(choices, fmt.Sprintf("%05d: %-52s [created: %s]",
+				choices = append(choices, fmt.Sprintf("%s %05d: %-52s [created: %s]",
+					vphoneTag(r.VRE(), r.VPhone),
 					r.Index,
 					label,
-					r.GetTimestamp().AsTime().Format("2006-01-02 15:04:05"),
+					r.ReleaseCreationTime().Format("2006-01-02 15:04:05"),
 				))
 			}
 
@@ -264,6 +290,100 @@ var downloadPccCmd = &cobra.Command{
 
 		return nil
 	},
+}
+
+// pccVPhoneFetcher partial-zips an OS asset's central directory and reports
+// whether the IPSW carries vphone600 research-device firmware. Apple shipped
+// vphone600 through cloudOS train 5E (iOS 26.3); train 5F (iOS 26.4) dropped
+// it, breaking iPhone-shaped virtualization (vphone-cli). Only the zip
+// listing is fetched — no file body reads — so this is cheap.
+func pccVPhoneFetcher(proxy string, insecure bool) func(url string) (download.VPhoneFirmware, error) {
+	return func(url string) (download.VPhoneFirmware, error) {
+		zr, err := download.NewRemoteZipReader(url, &download.RemoteConfig{Proxy: proxy, Insecure: insecure})
+		if err != nil {
+			return download.VPhoneFirmware{}, err
+		}
+		var count int
+		for _, f := range zr.File {
+			if strings.Contains(f.Name, download.VPhoneFirmwareToken) {
+				count++
+			}
+		}
+		return download.VPhoneFirmware{Present: count > 0, Count: count}, nil
+	}
+}
+
+// vphoneState classifies a release into one of four display buckets shared
+// by the --info banner and the interactive-picker tag.
+type vphoneState int
+
+const (
+	vphoneUnknown vphoneState = iota // not in cache, no metadata signal
+	vphoneVRE                        // metadata says VRE but firmware not checked
+	vphonePresent                    // firmware present in IPSW
+	vphoneMissing                    // firmware absent — the alert signal
+)
+
+// vphoneDisplay holds the strings + color + log level for each state, so the
+// picker tag and the --info banner can't drift on the next edit.
+//
+// tag is 7 cells wide on wide-emoji terminals; warn drives apex/log color.
+var vphoneDisplay = map[vphoneState]struct {
+	tag, banner, detail string
+	color               func(...any) string
+	warn                bool
+}{
+	vphonePresent: {"📱VPHN ", "📱 VPHONE", "vphone600 firmware present", color.New(color.Bold, color.FgHiGreen).SprintFunc(), false},
+	vphoneMissing: {"🚫NONE ", "🚫 NO VPHONE", "vphone600 firmware REMOVED — vresearch-only", color.New(color.Bold, color.FgHiRed).SprintFunc(), true},
+	vphoneVRE:     {"⬢VRE   ", "⬢ VRE", "metadata-only marker — IPSW firmware not checked", color.New(color.Bold, color.FgHiYellow).SprintFunc(), true},
+	vphoneUnknown: {"       ", "", "", nil, false},
+}
+
+func vphoneClassify(vre download.VRESignals, v *download.VPhoneFirmware) vphoneState {
+	// Only VRE releases get the missing-firmware alert. A non-VRE release
+	// without vphone600 was never expected to have it — silently classify
+	// as unknown so the picker tag and --info banner stay clean.
+	switch {
+	case v != nil && v.Present:
+		return vphonePresent
+	case v != nil && vre.IsVRE():
+		return vphoneMissing
+	case vre.IsVRE():
+		return vphoneVRE
+	default:
+		return vphoneUnknown
+	}
+}
+
+func vphoneTag(vre download.VRESignals, v *download.VPhoneFirmware) string {
+	return vphoneDisplay[vphoneClassify(vre, v)].tag
+}
+
+// printVPhoneBanner emits a one-line, indented status line at the bottom of
+// each --info release block. The missing branch is the alert signal.
+func printVPhoneBanner(vre download.VRESignals, v *download.VPhoneFirmware) {
+	d := vphoneDisplay[vphoneClassify(vre, v)]
+	if d.banner == "" {
+		return
+	}
+	fields := log.Fields{"device": vre.Device}
+	if v != nil && v.Count > 0 {
+		fields["count"] = v.Count
+	}
+	msg := d.color(d.banner) + "  " + d.detail
+	if d.warn {
+		utils.Indent(log.WithFields(fields).Warn, 2)(msg)
+	} else {
+		utils.Indent(log.WithFields(fields).Info, 2)(msg)
+	}
+}
+
+func pccVersionFields(v download.PCCVersion) log.Fields {
+	fields := log.Fields{"version": v.Version, "build": v.Build}
+	if channel := v.Channel(); channel != "" {
+		fields["channel"] = channel
+	}
+	return fields
 }
 
 // pccVersionFetcher returns a closure that partial-zips an OS asset to read

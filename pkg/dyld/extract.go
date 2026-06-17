@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,23 +26,41 @@ import (
 )
 
 var ErrNoCryptex = errors.New("cryptex-system NOT found in remote zip")
+var ErrNoDscFound = errors.New("failed to find dyld_shared_cache(s)")
+var ErrNoDscForArch = errors.New("no dyld_shared_cache files found matching the specified archs")
 
 var DscArches = []string{
 	"arm64", "arm64e", "x86_64", "x86_64h", "aot",
+}
+
+// DscDMGKind identifies which IPSW DMG a dyld_shared_cache extraction step
+// reads from.
+type DscDMGKind string
+
+const (
+	SystemOSDscDMG  DscDMGKind = "SystemOS"
+	RosettaOSDscDMG DscDMGKind = "RosettaOS"
+)
+
+// DscExtractionStep is one DMG to extract dyld_shared_cache(s) from, with the
+// arches to pull out of it (nil means all). AllowEmpty lets multi-DMG callers
+// continue past a DMG that has no matching caches and report a miss only if no
+// planned DMG yields artifacts.
+type DscExtractionStep struct {
+	Kind       DscDMGKind
+	Arches     []string
+	AllowEmpty bool
+}
+
+func IsDscNotFound(err error) bool {
+	return errors.Is(err, ErrNoDscFound) || errors.Is(err, ErrNoDscForArch)
 }
 
 func GetDscPathsInMount(mountPoint string, driverKit, all bool) ([]string, error) {
 	var matches []string
 	var re *regexp.Regexp
 
-	if runtime.GOOS == "linux" {
-		// apfs-fuse mounts volume at mountPoint + "/root", but hfsfuse mounts directly
-		// Check if /root subdirectory exists to determine mount structure
-		rootPath := filepath.Join(mountPoint, "root")
-		if _, err := os.Stat(rootPath); err == nil {
-			mountPoint = rootPath
-		}
-	}
+	mountPoint = utils.MountedFilesystemRoot(mountPoint)
 
 	if driverKit {
 		re = regexp.MustCompile(filepath.Join(mountPoint, DriverKitCacheRegex))
@@ -68,6 +87,122 @@ func GetDscPathsInMount(mountPoint string, driverKit, all bool) ([]string, error
 	}
 
 	return matches, nil
+}
+
+// DscExtractionPlan returns the DMG extraction steps needed to cover the
+// requested arches for the given IPSW. macOS 27+ moves the x86_64 family of
+// dyld_shared_caches into the Cryptex1,RosettaOS DMG, so plans for those
+// IPSWs can span two DMGs. driverKit affects whether empty secondary DMGs
+// are fatal: DriverKit extraction with no explicit arch scans any available
+// RosettaOS DMG opportunistically, but a RosettaOS image with no DriverKit
+// caches should not fail a SystemOS result.
+func DscExtractionPlan(i *info.Info, arches []string, driverKit bool) ([]DscExtractionStep, error) {
+	if !macOSX86DscRequiresRosetta(i) {
+		return dscExtractionPlan(arches, false, false, driverKit)
+	}
+
+	requiresRosettaMetadata := (len(arches) == 0 && !driverKit) || hasRosettaDscArch(arches)
+	opportunisticRosettaMetadata := len(arches) == 0 && driverKit
+	hasRosettaOS := false
+	if requiresRosettaMetadata || opportunisticRosettaMetadata {
+		if _, err := i.GetRosettaOsDmg(); err == nil {
+			hasRosettaOS = true
+		} else if !errors.Is(err, info.ErrorCryptexNotFound) {
+			// a truly absent cryptex is handled below; anything else (e.g.
+			// multiple RosettaOS DMGs) would otherwise masquerade as "absent"
+			if requiresRosettaMetadata {
+				return nil, fmt.Errorf("failed to determine RosettaOS DMG availability: %w", err)
+			}
+			log.Warnf("failed to determine optional RosettaOS DMG availability: %v; extracting SystemOS DriverKit caches only", err)
+		}
+	}
+	if !hasRosettaOS && len(arches) == 0 && !driverKit {
+		log.Warn("macOS 27+ moves x86_64 dyld_shared_cache(s) to the RosettaOS cryptex, but BuildManifest has no Cryptex1,RosettaOS; extracting SystemOS caches only")
+	}
+	return dscExtractionPlan(arches, hasRosettaOS, true, driverKit)
+}
+
+func dscExtractionPlan(arches []string, hasRosettaOS, requiresRosetta, driverKit bool) ([]DscExtractionStep, error) {
+	if !requiresRosetta {
+		return []DscExtractionStep{{Kind: SystemOSDscDMG, Arches: arches, AllowEmpty: driverKit && len(arches) == 0}}, nil
+	}
+
+	if len(arches) == 0 { // all arches: cover every DMG that carries DSCs
+		steps := []DscExtractionStep{{Kind: SystemOSDscDMG, AllowEmpty: driverKit}}
+		if hasRosettaOS {
+			steps = append(steps, DscExtractionStep{Kind: RosettaOSDscDMG, AllowEmpty: driverKit})
+		}
+		return steps, nil
+	}
+
+	var systemArches []string
+	var rosettaArches []string
+	for _, arch := range arches {
+		if isRosettaDscArch(arch) {
+			rosettaArches = append(rosettaArches, arch)
+		} else {
+			systemArches = append(systemArches, arch)
+		}
+	}
+
+	if len(rosettaArches) > 0 && !hasRosettaOS {
+		return nil, fmt.Errorf("macOS 27+ x86_64 dyld_shared_cache requires Cryptex1,RosettaOS in BuildManifest")
+	}
+
+	steps := make([]DscExtractionStep, 0, 2)
+	if len(systemArches) > 0 {
+		steps = append(steps, DscExtractionStep{Kind: SystemOSDscDMG, Arches: systemArches})
+	}
+	if len(rosettaArches) > 0 {
+		steps = append(steps, DscExtractionStep{Kind: RosettaOSDscDMG, Arches: rosettaArches})
+	}
+	return steps, nil
+}
+
+func macOSX86DscRequiresRosetta(i *info.Info) bool {
+	if i == nil || i.Plists == nil || i.Plists.BuildManifest == nil {
+		return false
+	}
+	if !utils.StrSliceContains(i.Plists.BuildManifest.SupportedProductTypes, "mac") {
+		return false
+	}
+	return utils.Compare(i.Plists.BuildManifest.ProductVersion, "27.0") >= 0
+}
+
+func isRosettaDscArch(arch string) bool {
+	switch arch {
+	case "x86_64", "x86_64h", "aot":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasRosettaDscArch(arches []string) bool {
+	return slices.ContainsFunc(arches, isRosettaDscArch)
+}
+
+func dscArchRegexParts(arches []string) []string {
+	parts := make([]string, 0, len(arches))
+	for _, arch := range arches {
+		switch arch {
+		case "aot":
+			parts = append(parts, "x86_64h?")
+		default:
+			parts = append(parts, regexp.QuoteMeta(arch))
+		}
+	}
+	return parts
+}
+
+func dscPathRegex(driverkit, all bool) string {
+	if driverkit {
+		return DriverKitCacheRegex
+	}
+	if all {
+		return CacheUberRegex
+	}
+	return CacheRegex
 }
 
 func ExtractFromDMG(i *info.Info, dmgPath, destPath, pemDB string, arches []string, driverkit, all bool) ([]string, error) {
@@ -136,9 +271,13 @@ func ExtractFromDMG(i *info.Info, dmgPath, destPath, pemDB string, arches []stri
 		}
 	}
 
+	mountedRoot := utils.MountedFilesystemRoot(mountPoint)
 	matches, err := GetDscPathsInMount(mountPoint, driverkit, all)
 	if err != nil {
 		return nil, err
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("%w in DMG: %s", ErrNoDscFound, dmgPath)
 	}
 
 	if utils.StrSliceContains(i.Plists.BuildManifest.SupportedProductTypes, "mac") { // Is macOS IPSW
@@ -159,7 +298,8 @@ func ExtractFromDMG(i *info.Info, dmgPath, destPath, pemDB string, arches []stri
 			matches = selMatches
 		} else {
 			var filtered []string
-			r := regexp.MustCompile(fmt.Sprintf("%s(%s)%s", CacheRegex, strings.Join(arches, "|"), CacheRegexEnding))
+			archPatterns := dscArchRegexParts(arches)
+			r := regexp.MustCompile(fmt.Sprintf("%s(%s)%s", dscPathRegex(driverkit, all), strings.Join(archPatterns, "|"), CacheRegexEnding))
 			for _, match := range matches {
 				if r.MatchString(match) {
 					filtered = append(filtered, match)
@@ -167,19 +307,24 @@ func ExtractFromDMG(i *info.Info, dmgPath, destPath, pemDB string, arches []stri
 			}
 
 			if len(filtered) == 0 {
-				return nil, fmt.Errorf("no dyld_shared_cache files found matching the specified archs: %v", arches)
+				return nil, fmt.Errorf("%w: %v", ErrNoDscForArch, arches)
 			}
 			matches = filtered
 		}
 	}
 
 	if len(matches) == 0 {
-		return nil, fmt.Errorf("failed to find dyld_shared_cache(s) in DMG: %s", dmgPath)
+		return nil, fmt.Errorf("%w in DMG: %s", ErrNoDscFound, dmgPath)
 	}
 
 	var artifacts []string
 	for _, match := range matches {
 		dyldDest := filepath.Join(destPath, filepath.Base(match))
+		if all {
+			if rel, err := filepath.Rel(mountedRoot, match); err == nil && !strings.HasPrefix(rel, "..") {
+				dyldDest = filepath.Join(destPath, rel)
+			}
+		}
 		// TODO: remove this (was commented out because I added --json to `ipsw extract` so the higher level func is now where this is printed)
 		// utils.Indent(log.Info, 3)(fmt.Sprintf("Extracting %s to %s", filepath.Base(match), dyldDest))
 		if err := utils.Copy(match, dyldDest); err != nil {
@@ -203,55 +348,143 @@ func Extract(ipsw, destPath, pemDB string, arches []string, driverkit, all bool)
 		return nil, fmt.Errorf("failed to parse IPSW: %v", err)
 	}
 
-	dmgPath, err := i.GetSystemOsDmg()
+	steps, err := DscExtractionPlan(i, arches, driverkit)
 	if err != nil {
-		dmgPath, err = i.GetFileSystemOsDmg()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get DMG containing the dyld_shared_caches: %v", err)
-		}
+		return nil, err
 	}
 
-	// check if filesystem DMG already exists (due to previous mount command)
-	if _, err := os.Stat(dmgPath); os.IsNotExist(err) {
-		tmpDIR, err := os.MkdirTemp("", "ipsw_extract_dyld")
+	var artifacts []string
+	var emptyErr error
+	for _, step := range steps {
+		dmgPath, err := dmgPathForDscStep(i, step.Kind)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create temporary directory: %v", err)
+			return nil, err
 		}
-		defer os.RemoveAll(tmpDIR)
 
-		dmgs, err := utils.Unzip(ipsw, tmpDIR, func(f *zip.File) bool {
-			return strings.EqualFold(filepath.Base(f.Name), dmgPath)
-		})
+		localDMGPath, cleanup, err := extractDmgFromIPSWIfNeeded(ipsw, dmgPath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to extract %s from IPSW: %v", dmgPath, err)
+			return nil, err
 		}
-		if len(dmgs) == 0 {
-			return nil, fmt.Errorf("File System %s NOT found in IPSW", dmgPath)
+
+		stepArtifacts, err := ExtractFromDMG(i, localDMGPath, destPath, pemDB, step.Arches, driverkit, all)
+		cleanup()
+		if err != nil {
+			if step.AllowEmpty && IsDscNotFound(err) {
+				if emptyErr == nil {
+					emptyErr = err
+				}
+				utils.Indent(log.Debug, 2)(fmt.Sprintf("No matching dyld_shared_cache(s) in optional %s DMG; continuing", step.Kind))
+				continue
+			}
+			return nil, err
 		}
-		// Update dmgPath to point to the extracted file location
-		dmgPath = dmgs[0]
+		if stepArtifacts == nil {
+			// nil artifacts with no error means the user interrupted the
+			// interactive cache selection; don't prompt for remaining DMGs
+			return artifacts, nil
+		}
+		artifacts = append(artifacts, stepArtifacts...)
 	}
 
-	return ExtractFromDMG(i, dmgPath, destPath, pemDB, arches, driverkit, all)
+	if len(artifacts) == 0 && emptyErr != nil {
+		return nil, emptyErr
+	}
+
+	return artifacts, nil
 }
 
-// ExtractFromRemoteCryptex extracts the dyld_shared_cache from the cryptex-system file in the given zip.Reader.
-// It creates a temp file for the cryptex-system file, patches it, and extracts the dyld_shared_cache from the decrypted file.
-// The extracted dyld_shared_cache is saved to the given destPath.
-// The function returns a slice of artifacts extracted from the dyld_shared_cache and an error if any.
-func ExtractFromRemoteCryptex(zr *zip.Reader, destPath, pemDB string, arches []string, driverkit, all bool) ([]string, error) {
-	re := regexp.MustCompile(`cryptex-system-(arm64e?|x86_64h?)$`)
-	if len(arches) > 0 {
-		var parts []string
-		for _, arch := range arches {
-			if arch == "arm64" || arch == "arm64e" {
-				parts = append(parts, "arm64e?")
-			} else {
-				parts = append(parts, "x86_64h?")
+func dmgPathForDscStep(i *info.Info, kind DscDMGKind) (string, error) {
+	switch kind {
+	case RosettaOSDscDMG:
+		dmgPath, err := i.GetRosettaOsDmg()
+		if err != nil {
+			return "", fmt.Errorf("failed to get RosettaOS DMG containing the x86_64 dyld_shared_cache(s): %v", err)
+		}
+		return dmgPath, nil
+	case SystemOSDscDMG:
+		dmgPath, err := i.GetSystemOsDmg()
+		if err != nil {
+			dmgPath, err = i.GetFileSystemOsDmg()
+			if err != nil {
+				return "", fmt.Errorf("failed to get DMG containing the dyld_shared_caches: %v", err)
 			}
 		}
-		re = regexp.MustCompile(fmt.Sprintf(`cryptex-system-(%s)$`, strings.Join(parts, "|")))
+		return dmgPath, nil
+	default:
+		return "", fmt.Errorf("unsupported dyld_shared_cache DMG kind: %s", kind)
 	}
+}
+
+func extractDmgFromIPSWIfNeeded(ipsw, dmgPath string) (string, func(), error) {
+	// Check if filesystem DMG already exists (due to previous mount command).
+	if _, err := os.Stat(dmgPath); err == nil {
+		return dmgPath, func() {}, nil
+	}
+
+	tmpDIR, err := os.MkdirTemp("", "ipsw_extract_dyld")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create temporary directory: %v", err)
+	}
+	cleanup := func() { os.RemoveAll(tmpDIR) }
+
+	dmgs, err := utils.Unzip(ipsw, tmpDIR, func(f *zip.File) bool {
+		return strings.EqualFold(f.Name, dmgPath) || strings.EqualFold(filepath.Base(f.Name), dmgPath)
+	})
+	if err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("failed to extract %s from IPSW: %v", dmgPath, err)
+	}
+	if len(dmgs) == 0 {
+		cleanup()
+		return "", nil, fmt.Errorf("DMG %s NOT found in IPSW", dmgPath)
+	}
+
+	return dmgs[0], cleanup, nil
+}
+
+// RemoteCryptexPattern returns the ZIP member matcher used for remote OTA
+// cryptex-system images.
+func RemoteCryptexPattern(arches []string) *regexp.Regexp {
+	if len(arches) == 0 {
+		return regexp.MustCompile(`cryptex-system-(arm64e?|x86_64h?)$`)
+	}
+	parts := remoteCryptexArchPatterns(arches)
+	if len(parts) == 0 {
+		return regexp.MustCompile(`a^`)
+	}
+	return regexp.MustCompile(fmt.Sprintf(`cryptex-system-(%s)$`, strings.Join(parts, "|")))
+}
+
+func remoteCryptexArchPatterns(arches []string) []string {
+	parts := make([]string, 0, len(arches))
+	for _, arch := range arches {
+		switch arch {
+		case "arm64", "arm64e", "x86_64", "x86_64h":
+			parts = append(parts, regexp.QuoteMeta(arch))
+		case "aot":
+			parts = append(parts, "x86_64h?")
+		}
+	}
+	return parts
+}
+
+// RemoteCryptexFiles returns remote OTA cryptex-system members matching arches.
+func RemoteCryptexFiles(files []*zip.File, arches []string) []*zip.File {
+	re := RemoteCryptexPattern(arches)
+	matches := make([]*zip.File, 0)
+	for _, file := range files {
+		if file.FileInfo().IsDir() || !re.MatchString(file.Name) {
+			continue
+		}
+		matches = append(matches, file)
+	}
+	return matches
+}
+
+// ExtractFromRemoteCryptex extracts the dyld_shared_cache from the
+// cryptex-system file in the given zip.Reader.
+func ExtractFromRemoteCryptex(zr *zip.Reader, destPath, pemDB string, arches []string, driverkit, all bool) ([]string, error) {
+	re := RemoteCryptexPattern(arches)
 	for _, zf := range zr.File {
 		if re.MatchString(zf.Name) {
 			rc, err := zf.Open()

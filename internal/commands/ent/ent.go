@@ -22,6 +22,7 @@ import (
 	cstypes "github.com/blacktop/go-macho/pkg/codesign/types"
 	ents "github.com/blacktop/ipsw/internal/codesign/entitlements"
 	"github.com/blacktop/ipsw/internal/colors"
+	"github.com/blacktop/ipsw/internal/search"
 	"github.com/blacktop/ipsw/internal/utils"
 	"github.com/blacktop/ipsw/pkg/aea"
 	"github.com/blacktop/ipsw/pkg/info"
@@ -29,6 +30,11 @@ import (
 
 // Entitlements is a map of entitlements
 type Entitlements map[string]any
+
+type mountedEntitlementFile struct {
+	Path   string
+	DBPath string
+}
 
 // Config is the configuration for the entitlements command
 type Config struct {
@@ -53,8 +59,9 @@ func GetDatabase(conf *Config) (map[string]string, error) {
 
 	// create or load entitlement database
 	if _, err := os.Stat(conf.Database); os.IsNotExist(err) {
-		utils.Indent(log.Info, 2)("Generating entitlement database file...")
 		if len(conf.IPSW) > 0 {
+			utils.Indent(log.Info, 2)("Generating entitlement database file...")
+
 			i, err := info.Parse(conf.IPSW)
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse IPSW: %v", err)
@@ -96,19 +103,8 @@ func GetDatabase(conf *Config) (map[string]string, error) {
 
 		if len(conf.Folder) > 0 {
 			var files []string
-			if err := filepath.Walk(conf.Folder, func(path string, info os.FileInfo, err error) error {
-				if err != nil {
-					// Skip paths with permission errors gracefully
-					if os.IsPermission(err) {
-						log.Debugf("skipping path due to permission denied: %s", path)
-						return nil
-					}
-					log.Debugf("failed to walk mount %s: %v", conf.Folder, err)
-					return nil
-				}
-				if !info.IsDir() {
-					files = append(files, path)
-				}
+			if err := search.WalkFilesInRoot(conf.Folder, func(path string) error {
+				files = append(files, path)
 				return nil
 			}); err != nil {
 				return nil, fmt.Errorf("failed to walk files in dir %s: %v", conf.Folder, err)
@@ -377,37 +373,23 @@ func scanEnts(ipswPath, dmgPath, dmgType string, conf *Config) (map[string]strin
 		}()
 	}
 
-	var files []string
-	if err := filepath.Walk(mountPoint, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			// Skip paths with permission errors gracefully
-			if os.IsPermission(err) {
-				log.Debugf("skipping path due to permission denied: %s", path)
-				return nil
-			}
-			log.Debugf("failed to walk mount %s: %v", mountPoint, err)
-			return nil
-		}
-		if !info.IsDir() {
-			files = append(files, path)
-		}
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("failed to walk files in dir %s: %v", mountPoint, err)
+	files, err := mountedEntitlementFiles(mountPoint)
+	if err != nil {
+		return nil, err
 	}
 
 	entDB := make(map[string]string)
 
 	for _, file := range files {
 		var m *macho.File
-		fat, err := macho.OpenFat(file)
+		fat, err := macho.OpenFat(file.Path)
 		if err == nil {
 			m = fat.Arches[len(fat.Arches)-1].File // grab last arch (probably arm64e)
 		} else {
 			if err == macho.ErrNotFat {
-				m, err = macho.Open(file)
+				m, err = macho.Open(file.Path)
 				if err != nil {
-					log.WithError(err).Warnf("failed to get entitlements for %s", file)
+					log.WithError(err).Warnf("failed to get entitlements for %s", file.Path)
 					continue // bad macho file (skip)
 				}
 			} else {
@@ -423,7 +405,7 @@ func scanEnts(ipswPath, dmgPath, dmgType string, conf *Config) (map[string]strin
 				// Fallback to DER entitlements if normal ones are empty
 				if decoded, err := ents.DerDecode(m.CodeSignature().EntitlementsDER); err == nil {
 					output.WriteString(decoded)
-					log.Warnf("using DER entitlements for %s", file)
+					log.Warnf("using DER entitlements for %s", file.Path)
 				}
 			}
 			// Add launch constraints if requested (for diff, not for database)
@@ -466,11 +448,26 @@ func scanEnts(ipswPath, dmgPath, dmgType string, conf *Config) (map[string]strin
 				}
 			}
 
-			entDB[strings.TrimPrefix(file, mountPoint)] = output.String()
+			entDB[file.DBPath] = output.String()
 		} else {
-			entDB[strings.TrimPrefix(file, mountPoint)] = ""
+			entDB[file.DBPath] = ""
 		}
 	}
 
 	return entDB, nil
+}
+
+func mountedEntitlementFiles(mountPoint string) ([]mountedEntitlementFile, error) {
+	root := utils.MountedFilesystemRoot(mountPoint)
+	var files []mountedEntitlementFile
+	if err := search.WalkFilesInRoot(root, func(path string) error {
+		files = append(files, mountedEntitlementFile{
+			Path:   path,
+			DBPath: strings.TrimPrefix(path, root),
+		})
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("failed to walk files in dir %s: %v", root, err)
+	}
+	return files, nil
 }

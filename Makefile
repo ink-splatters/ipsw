@@ -16,6 +16,7 @@ dev-deps: ## Install the dev dependencies
 	@go mod download
 	@go install github.com/goreleaser/goreleaser@latest
 	@go install golang.org/x/perf/cmd/benchstat@latest
+	@go install golang.org/x/tools/cmd/goimports@latest
 
 .PHONY: x86-brew
 x86-brew: ## Install the x86_64 homebrew on Apple Silicon
@@ -27,26 +28,35 @@ x86-brew: ## Install the x86_64 homebrew on Apple Silicon
 .PHONY: setup
 setup: build-deps dev-deps ## Install all the build and dev dependencies
 
+.PHONY: _require-sandbox
+_require-sandbox:
+	@test -d pkg/sandbox || { \
+	  echo "ERROR: pkg/sandbox/ is closed-source and not present in public clones."; \
+	  echo "       Targets requiring it: snapshot, dry_release, release, release-minor, docs."; \
+	  echo "       Public users: use 'make build' or 'go build ./cmd/ipsw'."; \
+	  exit 1; \
+	}
+
 .PHONY: dry_release
-dry_release: ## Run goreleaser without releasing/pushing artifacts to github
+dry_release: _require-sandbox ## Run goreleaser without releasing/pushing artifacts to github
 	@echo " > Creating Pre-release Build ${NEXT_VERSION}"
 	@GOROOT=$(shell go env GOROOT) goreleaser build --id darwin_extras_build --clean --timeout 60m --snapshot --single-target --output dist/ipsw
 
 .PHONY: snapshot
-snapshot: ## Run goreleaser snapshot
+snapshot: _require-sandbox ## Run goreleaser snapshot
 	@echo " > Creating Snapshot ${NEXT_VERSION}"
 	@GOROOT=$(shell go env GOROOT) goreleaser --clean --timeout 60m --snapshot
 
 .PHONY: release
-release: ## Create a new release from the NEXT_VERSION
+release: _require-sandbox ## Create a new release from the NEXT_VERSION
 	@echo " > Creating Release ${NEXT_VERSION}"
 	@hack/make/release ${NEXT_VERSION}
-	@GOROOT=$(shell go env GOROOT) goreleaser --clean --timeout 60m --skip=validate
+	@GOROOT=$(shell go env GOROOT) GITHUB_TOKEN=$(shell gh auth token) goreleaser --clean --timeout 60m --skip=validate
 	@echo " > Update Portfile ${NEXT_VERSION}"
 	@hack/make/portfile ../ports
 
 .PHONY: release-minor
-release-minor: ## Create a new minor semver release
+release-minor: _require-sandbox ## Create a new minor semver release
 	@echo " > Creating Release $(shell go tool svu --tag.pattern 'v3.1.*' minor)"
 	@hack/make/release $(shell go tool svu --tag.pattern 'v3.1.*' minor)
 	@GOROOT=$(shell go env GOROOT) goreleaser --clean --timeout 60m --skip=validate
@@ -79,7 +89,7 @@ build-linux: ## Build ipsw (linux)
 	@CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "-s -w --X github.com/blacktop/ipsw/api/types.BuildVersion=$(CUR_VERSION) -X github.com/blacktop/ipsw/api/types.BuildTime=$(date -u +%Y%m%d)" ./cmd/ipswd
 
 .PHONY: docs
-docs: ## Build the cli docs
+docs: _require-sandbox ## Build the cli docs
 	@echo " > Updating CLI Docs"
 	go generate ./...
 	hack/make/docs

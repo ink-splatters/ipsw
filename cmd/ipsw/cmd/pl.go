@@ -44,7 +44,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-var cache map[string]string
+var cache = map[string]string{}
 
 func readAllPlists(inpath string) error {
 	return filepath.Walk(inpath, func(path string, info os.FileInfo, err error) error {
@@ -56,7 +56,7 @@ func readAllPlists(inpath string) error {
 			return nil
 		}
 		if !info.IsDir() {
-			settings := make(map[string]any)
+			var settings any
 			data, err := os.ReadFile(path)
 			if err != nil {
 				if errors.Is(err, os.ErrPermission) {
@@ -89,8 +89,6 @@ func init() {
 		"com.apple.universalaccess.plist"}, "Exclude files/directories from watching")
 	viper.BindPFlag("plist.watch", plistCmd.Flags().Lookup("watch"))
 	viper.BindPFlag("plist.exclude", plistCmd.Flags().Lookup("exclude"))
-
-	cache = make(map[string]string)
 }
 
 // plistCmd represents the pl command
@@ -149,7 +147,7 @@ var plistCmd = &cobra.Command{
 						}
 						log.Infof("event: %s", event.String())
 
-						settings := make(map[string]any)
+						var settings any
 						data, err := os.ReadFile(event.Name)
 						if err != nil {
 							log.Fatal(err.Error())
@@ -235,7 +233,7 @@ var plistCmd = &cobra.Command{
 			}
 		}
 
-		var out map[string]any
+		var out any
 		if err := plist.NewDecoder(bytes.NewReader(data)).Decode(&out); err != nil {
 			return fmt.Errorf("failed to decode plist: %v", err)
 		}

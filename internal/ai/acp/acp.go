@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +17,8 @@ import (
 
 	"github.com/blacktop/ipsw/internal/ai/utils"
 )
+
+const maxACPStderrBytes = 4096
 
 type Config struct {
 	Prompt      string  `json:"prompt"`
@@ -34,6 +38,8 @@ type ACP struct {
 	conf   *Config
 	models map[string]string
 }
+
+var discardACPLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 func New(ctx context.Context, conf *Config) (*ACP, error) {
 	if conf == nil {
@@ -56,8 +62,8 @@ func (c *ACP) Models() (map[string]string, error) {
 		return c.models, nil
 	}
 
-	// Attempt to query supported models via ACP. The protocol exposes this via the
-	// (unstable) SessionModelState returned from `session/new`.
+	// Attempt to query supported models via ACP. The protocol exposes these as a
+	// "model"-category session config option returned from `session/new`.
 	models, err := c.fetchModelsViaACP()
 	if err == nil && len(models) > 0 {
 		c.models = models
@@ -95,6 +101,7 @@ func (c *ACP) fetchModelsViaACP() (map[string]string, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("acp: failed to start agent command '%s': %w", c.conf.Command, err)
 	}
+	stderrCapture := copyACPStderr(stderr, c.conf.Verbose)
 	defer func() {
 		_ = stdin.Close()
 		_ = stdout.Close()
@@ -105,55 +112,32 @@ func (c *ACP) fetchModelsViaACP() (map[string]string, error) {
 		_ = cmd.Wait()
 	}()
 
-	go func() {
-		if c.conf.Verbose {
-			_, _ = io.Copy(os.Stderr, stderr)
-		} else {
-			_, _ = io.Copy(io.Discard, stderr)
-		}
-	}()
-
-	client := &collectingClient{}
-	conn := acp.NewClientSideConnection(client, stdin, stdout)
-
-	if _, err = conn.Initialize(ctx, acp.InitializeRequest{
-		ProtocolVersion: acp.ProtocolVersionNumber,
-		ClientCapabilities: acp.ClientCapabilities{
-			// NOTE: Some ACP agents (notably gemini --experimental-acp) validate that
-			// fs.readTextFile and fs.writeTextFile are present in the initialize payload.
-			// The SDK uses `omitempty` on these booleans, so `false` would be omitted and
-			// the agent rejects the request. We advertise support but still enforce a
-			// deny-by-default policy in the handler implementations.
-			Fs:       acp.FileSystemCapability{ReadTextFile: true, WriteTextFile: true},
-			Terminal: false,
-		},
-	}); err != nil {
-		return nil, fmt.Errorf("acp: initialize failed: %w", err)
-	}
-
-	cwd, err := os.Getwd()
+	clientConn, err := newClientConnection(stdin, stdout, c.conf.Verbose)
 	if err != nil {
-		cwd = "/"
+		return nil, err
 	}
-
-	sess, err := conn.NewSession(ctx, acp.NewSessionRequest{
-		Cwd:        cwd,
+	if err := initializeClient(ctx, clientConn.conn); err != nil {
+		return nil, stderrCapture.wrap(err)
+	}
+	sess, err := clientConn.conn.NewSession(ctx, acp.NewSessionRequest{
+		Cwd:        clientConn.cwd,
 		McpServers: []acp.McpServer{},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("acp: newSession failed: %w", err)
+		return nil, stderrCapture.wrap(fmt.Errorf("acp: newSession failed: %w", err))
 	}
 
 	models := make(map[string]string)
-	if sess.Models == nil {
+	sel := modelConfigOption(sess.ConfigOptions)
+	if sel == nil {
 		return models, nil
 	}
-	for _, mi := range sess.Models.AvailableModels {
-		id := strings.TrimSpace(string(mi.ModelId))
+	for _, opt := range selectOptionValues(sel) {
+		id := strings.TrimSpace(string(opt.Value))
 		if id == "" {
 			continue
 		}
-		key := strings.TrimSpace(mi.Name)
+		key := strings.TrimSpace(opt.Name)
 		if key == "" {
 			key = id
 		}
@@ -166,6 +150,38 @@ func (c *ACP) fetchModelsViaACP() (map[string]string, error) {
 	return models, nil
 }
 
+// modelConfigOption returns the model-selection config option the agent
+// advertised in its session configuration, or nil if none is exposed. The ACP
+// protocol surfaces model choices as a "select" session config option tagged
+// with the "model" category.
+func modelConfigOption(opts []acp.SessionConfigOption) *acp.SessionConfigOptionSelect {
+	for i := range opts {
+		sel := opts[i].Select
+		if sel == nil || sel.Category == nil {
+			continue
+		}
+		if *sel.Category == acp.SessionConfigOptionCategoryModel {
+			return sel
+		}
+	}
+	return nil
+}
+
+// selectOptionValues flattens a select config option's grouped and ungrouped
+// values into a single slice.
+func selectOptionValues(sel *acp.SessionConfigOptionSelect) []acp.SessionConfigSelectOption {
+	var out []acp.SessionConfigSelectOption
+	if sel.Options.Ungrouped != nil {
+		out = append(out, (*sel.Options.Ungrouped)...)
+	}
+	if sel.Options.Grouped != nil {
+		for _, group := range *sel.Options.Grouped {
+			out = append(out, group.Options...)
+		}
+	}
+	return out
+}
+
 func (c *ACP) SetModel(model string) error {
 	model = strings.TrimSpace(model)
 	if model == "" {
@@ -174,10 +190,13 @@ func (c *ACP) SetModel(model string) error {
 	if c.models == nil {
 		c.models = make(map[string]string)
 	}
-	// ACP agents/adapters may accept arbitrary model IDs without a prior list.
-	if _, ok := c.models[model]; !ok {
-		c.models[model] = model
+	if modelID := strings.TrimSpace(c.models[model]); modelID != "" {
+		c.models[modelID] = modelID
+		c.conf.Model = modelID
+		return nil
 	}
+	// ACP agents/adapters may accept arbitrary model IDs without a prior list.
+	c.models[model] = model
 	c.conf.Model = model
 	return nil
 }
@@ -206,12 +225,16 @@ func (c *ACP) Verify() error {
 type collectingClient struct {
 	mu sync.Mutex
 	b  strings.Builder
+
+	cwd string
 }
 
 var _ acp.Client = (*collectingClient)(nil)
 
 func (c *collectingClient) RequestPermission(ctx context.Context, p acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
-	// Default to cancelling any tool permissions. The decompiler prompt should not require tools.
+	if id, ok := autoApprovedPermissionOption(p); ok {
+		return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(id)}, nil
+	}
 	return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Cancelled: &acp.RequestPermissionOutcomeCancelled{}}}, nil
 }
 
@@ -233,8 +256,19 @@ func (c *collectingClient) String() string {
 	return c.b.String()
 }
 
-func (c *collectingClient) ReadTextFile(ctx context.Context, _ acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
-	return acp.ReadTextFileResponse{}, fmt.Errorf("acp client: readTextFile denied")
+func (c *collectingClient) ReadTextFile(ctx context.Context, req acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return acp.ReadTextFileResponse{}, err
+	}
+	path, err := c.resolveReadPath(req.Path)
+	if err != nil {
+		return acp.ReadTextFileResponse{}, err
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return acp.ReadTextFileResponse{}, fmt.Errorf("acp client: read %s: %w", req.Path, err)
+	}
+	return acp.ReadTextFileResponse{Content: readTextWindow(string(b), req.Line, req.Limit)}, nil
 }
 
 func (c *collectingClient) WriteTextFile(ctx context.Context, _ acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
@@ -245,8 +279,8 @@ func (c *collectingClient) CreateTerminal(ctx context.Context, _ acp.CreateTermi
 	return acp.CreateTerminalResponse{}, fmt.Errorf("acp client: terminal not supported")
 }
 
-func (c *collectingClient) KillTerminalCommand(ctx context.Context, _ acp.KillTerminalCommandRequest) (acp.KillTerminalCommandResponse, error) {
-	return acp.KillTerminalCommandResponse{}, fmt.Errorf("acp client: terminal not supported")
+func (c *collectingClient) KillTerminal(ctx context.Context, _ acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
+	return acp.KillTerminalResponse{}, fmt.Errorf("acp client: terminal not supported")
 }
 
 func (c *collectingClient) ReleaseTerminal(ctx context.Context, _ acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
@@ -259,6 +293,193 @@ func (c *collectingClient) TerminalOutput(ctx context.Context, _ acp.TerminalOut
 
 func (c *collectingClient) WaitForTerminalExit(ctx context.Context, _ acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
 	return acp.WaitForTerminalExitResponse{}, fmt.Errorf("acp client: terminal not supported")
+}
+
+type acpStderrCapture struct {
+	tail *lockedTailBuffer
+	done chan struct{}
+}
+
+type lockedTailBuffer struct {
+	mu    sync.Mutex
+	limit int
+	buf   []byte
+}
+
+func newLockedTailBuffer(limit int) *lockedTailBuffer {
+	return &lockedTailBuffer{limit: limit}
+}
+
+func (b *lockedTailBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf = append(b.buf, p...)
+	if len(b.buf) > b.limit {
+		b.buf = b.buf[len(b.buf)-b.limit:]
+	}
+	return len(p), nil
+}
+
+func (b *lockedTailBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return strings.TrimSpace(string(b.buf))
+}
+
+func copyACPStderr(stderr io.Reader, verbose bool) *acpStderrCapture {
+	tail := newLockedTailBuffer(maxACPStderrBytes)
+	capture := &acpStderrCapture{
+		tail: tail,
+		done: make(chan struct{}),
+	}
+	dst := io.Writer(tail)
+	if verbose {
+		dst = io.MultiWriter(os.Stderr, tail)
+	}
+	go func() {
+		defer close(capture.done)
+		_, _ = io.Copy(dst, stderr)
+	}()
+	return capture
+}
+
+func (c *acpStderrCapture) String() string {
+	if c == nil || c.tail == nil {
+		return ""
+	}
+	select {
+	case <-c.done:
+	case <-time.After(100 * time.Millisecond):
+	}
+	return c.tail.String()
+}
+
+func (c *acpStderrCapture) wrap(err error) error {
+	if c == nil {
+		return err
+	}
+	if stderr := c.String(); stderr != "" {
+		return fmt.Errorf("%w\nagent stderr:\n%s", err, stderr)
+	}
+	return err
+}
+
+type clientConnection struct {
+	cwd    string
+	client *collectingClient
+	conn   *acp.ClientSideConnection
+}
+
+func newClientConnection(stdin io.Writer, stdout io.Reader, verbose bool) (*clientConnection, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("acp: failed to get current working directory: %w", err)
+	}
+	client := &collectingClient{cwd: cwd}
+	conn := acp.NewClientSideConnection(client, stdin, stdout)
+	if !verbose {
+		conn.SetLogger(discardACPLogger)
+	}
+	return &clientConnection{cwd: cwd, client: client, conn: conn}, nil
+}
+
+func initializeClient(ctx context.Context, conn *acp.ClientSideConnection) error {
+	_, err := conn.Initialize(ctx, acp.InitializeRequest{
+		ProtocolVersion: acp.ProtocolVersionNumber,
+		ClientCapabilities: acp.ClientCapabilities{
+			// NOTE: Some ACP agents (notably gemini --experimental-acp) validate that
+			// fs.readTextFile and fs.writeTextFile are present in the initialize payload.
+			// The SDK uses `omitempty` on these booleans, so `false` would be omitted and
+			// the agent rejects the request. We support readTextFile within the
+			// session cwd and keep writeTextFile denied in the handler implementation.
+			Fs:       acp.FileSystemCapabilities{ReadTextFile: true, WriteTextFile: true},
+			Terminal: false,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("acp: initialize failed: %w", err)
+	}
+	return nil
+}
+
+func autoApprovedPermissionOption(req acp.RequestPermissionRequest) (acp.PermissionOptionId, bool) {
+	if req.ToolCall.Kind == nil {
+		return "", false
+	}
+	switch *req.ToolCall.Kind {
+	case acp.ToolKindRead, acp.ToolKindSearch, acp.ToolKindThink:
+	default:
+		return "", false
+	}
+	for _, opt := range req.Options {
+		if opt.Kind == acp.PermissionOptionKindAllowOnce {
+			return opt.OptionId, true
+		}
+	}
+	for _, opt := range req.Options {
+		if opt.Kind == acp.PermissionOptionKindAllowAlways {
+			return opt.OptionId, true
+		}
+	}
+	return "", false
+}
+
+func (c *collectingClient) resolveReadPath(path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("acp client: readTextFile path must be absolute: %s", path)
+	}
+	root, err := filepath.Abs(c.cwd)
+	if err != nil {
+		return "", fmt.Errorf("acp client: resolve cwd %s: %w", c.cwd, err)
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("acp client: resolve cwd %s: %w", c.cwd, err)
+	}
+	target, err := filepath.EvalSymlinks(filepath.Clean(path))
+	if err != nil {
+		return "", fmt.Errorf("acp client: resolve read path %s: %w", path, err)
+	}
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return "", fmt.Errorf("acp client: resolve read path %s relative to %s: %w", path, root, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("acp client: readTextFile outside session cwd denied: %s", path)
+	}
+	return target, nil
+}
+
+func readTextWindow(content string, line, limit *int) string {
+	if line == nil && limit == nil {
+		return content
+	}
+	lines := strings.Split(content, "\n")
+	start := 0
+	if line != nil && *line > 1 {
+		start = min(*line-1, len(lines))
+	}
+	end := len(lines)
+	if limit != nil {
+		if *limit <= 0 {
+			end = start
+		} else if start+*limit < end {
+			end = start + *limit
+		}
+	}
+	return strings.Join(lines[start:end], "\n")
+}
+
+func promptStopError(reason acp.StopReason, resp string) error {
+	resp = strings.TrimSpace(utils.Clean(resp))
+	if resp == "" {
+		return fmt.Errorf("acp: prompt stopped with %s", reason)
+	}
+	const maxStopReasonSnippet = 1024
+	if len(resp) > maxStopReasonSnippet {
+		resp = resp[:maxStopReasonSnippet] + "... (truncated)"
+	}
+	return fmt.Errorf("acp: prompt stopped with %s: %s", reason, resp)
 }
 
 func (c *ACP) Chat() (string, error) {
@@ -288,6 +509,7 @@ func (c *ACP) Chat() (string, error) {
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("acp: failed to start agent command '%s': %w", c.conf.Command, err)
 	}
+	stderrCapture := copyACPStderr(stderr, c.conf.Verbose)
 	defer func() {
 		_ = stdin.Close()
 		_ = stdout.Close()
@@ -298,62 +520,53 @@ func (c *ACP) Chat() (string, error) {
 		_ = cmd.Wait()
 	}()
 
-	go func() {
-		if c.conf.Verbose {
-			_, _ = io.Copy(os.Stderr, stderr)
-		} else {
-			_, _ = io.Copy(io.Discard, stderr)
-		}
-	}()
-
-	client := &collectingClient{}
-	conn := acp.NewClientSideConnection(client, stdin, stdout)
-
-	if _, err = conn.Initialize(ctx, acp.InitializeRequest{
-		ProtocolVersion: acp.ProtocolVersionNumber,
-		ClientCapabilities: acp.ClientCapabilities{
-			// NOTE: Some ACP agents (notably gemini --experimental-acp) validate that
-			// fs.readTextFile and fs.writeTextFile are present in the initialize payload.
-			// The SDK uses `omitempty` on these booleans, so `false` would be omitted and
-			// the agent rejects the request. We advertise support but still enforce a
-			// deny-by-default policy in the handler implementations.
-			Fs:       acp.FileSystemCapability{ReadTextFile: true, WriteTextFile: true},
-			Terminal: false,
-		},
-	}); err != nil {
-		return "", fmt.Errorf("acp: initialize failed: %w", err)
-	}
-
-	cwd, err := os.Getwd()
+	clientConn, err := newClientConnection(stdin, stdout, c.conf.Verbose)
 	if err != nil {
-		cwd = "/"
+		return "", err
+	}
+	if err := initializeClient(ctx, clientConn.conn); err != nil {
+		return "", stderrCapture.wrap(err)
 	}
 
-	sess, err := conn.NewSession(ctx, acp.NewSessionRequest{
-		Cwd:        cwd,
+	sess, err := clientConn.conn.NewSession(ctx, acp.NewSessionRequest{
+		Cwd:        clientConn.cwd,
 		McpServers: []acp.McpServer{},
 	})
 	if err != nil {
-		return "", fmt.Errorf("acp: newSession failed: %w", err)
+		return "", stderrCapture.wrap(fmt.Errorf("acp: newSession failed: %w", err))
 	}
 
-	// Best-effort: attempt to set model if the agent supports it (UNSTABLE ACP API).
+	// Best-effort: attempt to set the model if the agent advertises a model
+	// configuration option (ACP session config option, category "model").
 	if m := strings.TrimSpace(c.conf.Model); m != "" && m != "default" {
-		if _, setErr := conn.SetSessionModel(ctx, acp.SetSessionModelRequest{SessionId: sess.SessionId, ModelId: acp.ModelId(m)}); setErr != nil {
-			if c.conf.Verbose {
-				log.Debugf("acp: SetSessionModel failed (ignored): %v", setErr)
+		if sel := modelConfigOption(sess.ConfigOptions); sel != nil {
+			setModelReq := acp.SetSessionConfigOptionRequest{
+				ValueId: &acp.SetSessionConfigOptionValueId{
+					ConfigId:  sel.Id,
+					SessionId: sess.SessionId,
+					Value:     acp.SessionConfigValueId(m),
+				},
+			}
+			if _, setErr := clientConn.conn.SetSessionConfigOption(ctx, setModelReq); setErr != nil {
+				if c.conf.Verbose {
+					log.Debugf("acp: SetSessionConfigOption(model) failed (ignored): %v", setErr)
+				}
 			}
 		}
 	}
 
-	if _, err = conn.Prompt(ctx, acp.PromptRequest{
+	promptResp, err := clientConn.conn.Prompt(ctx, acp.PromptRequest{
 		SessionId: sess.SessionId,
 		Prompt:    []acp.ContentBlock{acp.TextBlock(c.conf.Prompt)},
-	}); err != nil {
-		return "", fmt.Errorf("acp: prompt failed: %w", err)
+	})
+	if err != nil {
+		return "", stderrCapture.wrap(fmt.Errorf("acp: prompt failed: %w", err))
 	}
 
-	resp := strings.TrimSpace(client.String())
+	resp := strings.TrimSpace(clientConn.client.String())
+	if promptResp.StopReason != "" && promptResp.StopReason != acp.StopReasonEndTurn {
+		return "", promptStopError(promptResp.StopReason, resp)
+	}
 	if resp == "" {
 		return "", fmt.Errorf("no content returned from agent")
 	}

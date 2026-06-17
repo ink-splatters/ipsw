@@ -34,6 +34,8 @@ import (
 	"github.com/MakeNowJust/heredoc/v2"
 	"github.com/apex/log"
 	"github.com/blacktop/ipsw/internal/demangle"
+	"github.com/blacktop/ipsw/internal/utils"
+	"github.com/blacktop/ipsw/internal/xcode"
 	"github.com/blacktop/ipsw/pkg/crashlog"
 	"github.com/blacktop/ipsw/pkg/dyld"
 	"github.com/blacktop/ipsw/pkg/info"
@@ -49,7 +51,7 @@ func init() {
 	symbolicateCmd.Flags().StringP("proc", "p", "", "Filter crashlog by process name")
 	symbolicateCmd.Flags().BoolP("unslide", "u", false, "Unslide user-space addresses for static analysis (kernel frames are always unslid)")
 	symbolicateCmd.Flags().String("kc-slide", "", "Apply custom KASLR slide to kernelcache frames for live debugging (hex, e.g. 0x14f74000)")
-	symbolicateCmd.Flags().String("dsc-slide", "", "Apply custom slide to dyld_shared_cache frames for live debugging (hex, e.g. 0x1a000000)")
+	symbolicateCmd.Flags().String("dsc-slide", "", "Rebase dyld_shared_cache frames onto this base for static analysis (hex, e.g. 0x180000000)")
 	symbolicateCmd.Flags().BoolP("demangle", "d", false, "Demangle symbol names")
 	symbolicateCmd.Flags().Bool("hex", false, "Display function offsets in hexadecimal")
 	symbolicateCmd.Flags().Bool("peek", false, "Show disassembly instructions around each panicked frame")
@@ -91,6 +93,11 @@ var symbolicateCmd = &cobra.Command{
 	# Symbolicate a panic crashlog (BugType=210) with an IPSW
 	❯ ipsw symbolicate panic-full-2024-03-21-004704.000.ips iPad_Pro_HFR_17.4_21E219_Restore.ipsw
 
+	# Symbolicate without an IPSW/DSC; falls back to the matching Xcode DeviceSupport DSC
+	❯ ipsw symbolicate panic-full-2024-03-21-004704.000.ips
+	  # Uses ~/Library/Developer/Xcode/<Platform> DeviceSupport/<device> (<build>)/Symbols
+	  # (userspace frames only for panics; kernel frames still need an IPSW)
+
 	# Show disassembly around panic frames with --peek (default 5 instructions)
 	❯ ipsw symbolicate panic.ips firmware.ipsw --peek
 
@@ -108,9 +115,10 @@ var symbolicateCmd = &cobra.Command{
 	  # Useful when reproducing a crash with a different KASLR slide
 	  # Shows runtime addresses you can use with lldb breakpoints
 
-	# Apply custom slide to dyld_shared_cache frames for lldb live debugging
-	❯ ipsw symbolicate panic.ips firmware.ipsw --dsc-slide 0x1a000000
-	  # For debugging user-space crashes where DSC was loaded at a different address
+	# Rebase dyld_shared_cache frames onto a static base (e.g. to match Binary Ninja/IDA)
+	❯ ipsw symbolicate crash.ips --dsc-slide 0x180000000
+	  # Cache frames display as base + offset-into-cache so they line up with your disassembler
+	  # (uses the report's sharedCache.base to compute the offset; pass 0 for raw cache offsets)
 
 	# Combine both slides for full runtime address mapping
 	❯ ipsw symbolicate panic.ips firmware.ipsw --kc-slide 0x14f74000 --dsc-slide 0x1a000000
@@ -223,7 +231,22 @@ var symbolicateCmd = &cobra.Command{
 					if err := ips.Symbolicate210WithDatabase(u.String()); err != nil {
 						return err
 					}
+				} else if ds, err := xcode.FindDeviceSupport(ips.Payload.Product, ips.Header.Version(), ips.Header.Build()); err == nil {
+					if len(ds.DSCs) > 0 {
+						log.Infof("Using Xcode DeviceSupport DSC for %s", filepath.Base(ds.Dir))
+						utils.Indent(log.Warn, 2)("userspace frames only (kernel frames need an IPSW)")
+						if err := ips.Symbolicate210("", ds.DSCs, ""); err != nil {
+							return err
+						}
+					} else {
+						log.Infof("Using Xcode DeviceSupport dylibs for %s", filepath.Base(ds.Dir))
+						utils.Indent(log.Warn, 2)("no DSC; userspace frames only (kernel frames need an IPSW)")
+						if err := ips.Symbolicate210("", nil, ds.Symbols); err != nil {
+							return err
+						}
+					}
 				} else {
+					log.WithError(err).Debug("no Xcode DeviceSupport dump found")
 					log.Warnf("please supply %s %s IPSW for symbolication", ips.Payload.Product, ips.Header.OsVersion)
 				}
 			} else {
@@ -252,7 +275,7 @@ var symbolicateCmd = &cobra.Command{
 							i.Plists.BuildManifest.ProductVersion, i.Plists.BuildManifest.ProductBuildVersion,
 						)
 					}
-					if err := ips.Symbolicate210(filepath.Clean(args[1])); err != nil {
+					if err := ips.Symbolicate210(filepath.Clean(args[1]), nil, ""); err != nil {
 						return err
 					}
 				}
@@ -265,9 +288,22 @@ var symbolicateCmd = &cobra.Command{
 			}
 			defer crashLog.Close()
 
+			dscPath := ""
 			if len(args) > 1 {
-				dscPath := filepath.Clean(args[1])
+				dscPath = filepath.Clean(args[1])
+			} else if ds, err := xcode.FindDeviceSupport(crashLog.HardwareModel, crashLog.OSVersion, crashLog.OSBuild); err == nil {
+				if len(ds.DSCs) > 0 {
+					dscPath = ds.DSCs[0]
+					log.Infof("Using Xcode DeviceSupport DSC for %s", filepath.Base(ds.Dir))
+					utils.Indent(log.Info, 2)("dsc=" + dscPath)
+				} else {
+					log.Warnf("Xcode DeviceSupport dump for %s has no dyld_shared_cache; loose-dylib symbolication for old-style (109) crashes is not yet supported", filepath.Base(ds.Dir))
+				}
+			} else {
+				log.WithError(err).Debug("no Xcode DeviceSupport dump found")
+			}
 
+			if dscPath != "" {
 				fileInfo, err := os.Lstat(dscPath)
 				if err != nil {
 					return fmt.Errorf("file %s does not exist", dscPath)

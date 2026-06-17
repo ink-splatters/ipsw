@@ -3,7 +3,6 @@ package kernelcache
 import (
 	"archive/zip"
 	"bytes"
-	"encoding/asn1"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -27,14 +26,6 @@ import (
 	"github.com/pkg/errors"
 )
 
-// Im4p Kernelcache object
-type Im4p struct {
-	IM4P    string
-	Name    string
-	Version string
-	Data    []byte
-}
-
 // A CompressedCache represents an open compressed kernelcache file.
 type CompressedCache struct {
 	Magic  []byte
@@ -42,6 +33,8 @@ type CompressedCache struct {
 	Size   int
 	Data   []byte
 }
+
+var ErrEncryptedKernelCache = errors.New("encrypted kernelcache")
 
 // KernelVersion represents the kernel version.
 // swagger:model
@@ -122,9 +115,15 @@ func ParseImg4Data(data []byte) (*CompressedCache, error) {
 	// NOTE: openssl asn1parse -i -inform DER -in kernelcache.iphone10 | less (to get offset)
 	//       openssl asn1parse -i -inform DER -in kernelcache.iphone10 -strparse OFFSET -noout -out lzfse.bin
 
-	var i Im4p
-	if _, err := asn1.Unmarshal(data, &i); err != nil {
+	i, err := img4.ParsePayload(data)
+	if err != nil {
 		return nil, errors.Wrap(err, "failed to ASN.1 parse kernelcache")
+	}
+	if i.Encrypted {
+		return nil, ErrEncryptedKernelCache
+	}
+	if len(i.Data) < 4 {
+		return nil, fmt.Errorf("kernelcache payload too short: %d bytes", len(i.Data))
 	}
 
 	cc := CompressedCache{
@@ -373,7 +372,7 @@ func Extract(ipsw, destPath, device string) (map[string][]string, error) {
 
 		kc, err := ParseImg4Data(content)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse im4p kernelcache data: %v", err)
+			return nil, fmt.Errorf("failed to parse im4p kernelcache data: %w", err)
 		}
 
 		dec, err := DecompressData(kc)
@@ -401,6 +400,15 @@ func RemoteParse(zr *zip.Reader, destPath, device string) (map[string][]string, 
 	if err != nil {
 		return nil, err
 	}
+	return RemoteParseWithInfo(i, zr, destPath, device)
+}
+
+// RemoteParseWithInfo extracts remote kernelcaches using already-parsed IPSW
+// metadata.
+func RemoteParseWithInfo(i *info.Info, zr *zip.Reader, destPath, device string) (map[string][]string, error) {
+	if i == nil {
+		return nil, fmt.Errorf("missing remote IPSW metadata")
+	}
 
 	artifacts := make(map[string][]string)
 
@@ -411,17 +419,14 @@ func RemoteParse(zr *zip.Reader, destPath, device string) (map[string][]string, 
 				continue // skip if kernel not for given device
 			}
 			if _, err := os.Stat(fname); os.IsNotExist(err) {
-				kdata := make([]byte, f.UncompressedSize64)
-				rc, err := f.Open()
+				kdata, err := readZipFileExact(f)
 				if err != nil {
-					return nil, fmt.Errorf("failed to open kernelcache %s in zip: %v", f.Name, err)
+					return nil, err
 				}
-				io.ReadFull(rc, kdata)
-				rc.Close()
 
 				kcomp, err := ParseImg4Data(kdata)
 				if err != nil {
-					return nil, fmt.Errorf("failed to parse kernelcache im4p %s: %v", f.Name, err)
+					return nil, fmt.Errorf("failed to parse kernelcache im4p %s: %w", f.Name, err)
 				}
 
 				dec, err := DecompressData(kcomp)
@@ -443,6 +448,24 @@ func RemoteParse(zr *zip.Reader, destPath, device string) (map[string][]string, 
 	}
 
 	return artifacts, nil
+}
+
+func readZipFileExact(f *zip.File) ([]byte, error) {
+	data := make([]byte, f.UncompressedSize64)
+	rc, err := f.Open()
+	if err != nil {
+		return nil, fmt.Errorf("failed to open kernelcache %s in zip: %v", f.Name, err)
+	}
+	if _, err := io.ReadFull(rc, data); err != nil {
+		if closeErr := rc.Close(); closeErr != nil {
+			return nil, fmt.Errorf("failed to read kernelcache %s: %v (close error: %v)", f.Name, err, closeErr)
+		}
+		return nil, fmt.Errorf("failed to read kernelcache %s: %v", f.Name, err)
+	}
+	if err := rc.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close kernelcache %s: %v", f.Name, err)
+	}
+	return data, nil
 }
 
 func GetVersion(m *macho.File) (*Version, error) {

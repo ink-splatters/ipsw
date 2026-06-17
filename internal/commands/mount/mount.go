@@ -20,7 +20,7 @@ import (
 	"github.com/blacktop/ipsw/pkg/info"
 )
 
-var DmgTypes = []string{"app", "sys", "fs", "exc", "rdisk"}
+var DmgTypes = []string{"app", "sys", "fs", "exc", "rdisk", "rosetta"}
 
 // Config contains optional options for mounting a DMG from an IPSW
 type Config struct {
@@ -28,6 +28,11 @@ type Config struct {
 	Keys       any    // Either string (DMG key) or download.WikiFWKeys (auto-lookup)
 	MountPoint string // Custom mount point
 	Ident      string // BuildManifest identity selector (used for rdisk)
+	// ExtractDir is where DMGs are extracted/decrypted (default: os.TempDir()).
+	// Callers that also mount the same volumes via internal/search.scanDmg (which
+	// extracts to the cwd) set this to the cwd so both share one backing file and
+	// the same volume is never attached twice.
+	ExtractDir string
 }
 
 // Context is the mount context
@@ -123,14 +128,23 @@ func DmgInIPSW(path, typ string, cfg *Config) (*Context, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to get RestoreRamDisk DMG: %v", err)
 		}
+	case "rosetta":
+		dmgPath, err = i.GetRosettaOsDmg()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get RosettaOS DMG: %v", err)
+		}
 	default:
 		return nil, fmt.Errorf("invalid subcommand: %s; must be one of: '%s'", typ, strings.Join(DmgTypes, "', '"))
 	}
 
-	extractedDMG := filepath.Join(os.TempDir(), dmgPath)
+	extractDir := cfg.ExtractDir
+	if extractDir == "" {
+		extractDir = os.TempDir()
+	}
+	extractedDMG := filepath.Join(extractDir, dmgPath)
 
 	if _, err := os.Stat(extractedDMG); os.IsNotExist(err) {
-		dmgs, err := utils.Unzip(ipswPath, os.TempDir(), func(f *zip.File) bool {
+		dmgs, err := utils.Unzip(ipswPath, extractDir, func(f *zip.File) bool {
 			return strings.EqualFold(filepath.Base(f.Name), dmgPath)
 		})
 		if err != nil {
@@ -142,12 +156,10 @@ func DmgInIPSW(path, typ string, cfg *Config) (*Context, error) {
 	}
 
 	if filepath.Ext(extractedDMG) == ".aea" {
-		defer func() {
-			_ = os.Remove(extractedDMG) // remove the encrypted AEA DMG after decrypting and mounting
-		}()
+		encryptedDMG := extractedDMG
 		extractedDMG, err = aea.Decrypt(&aea.DecryptConfig{
-			Input:    extractedDMG,
-			Output:   filepath.Dir(extractedDMG),
+			Input:    encryptedDMG,
+			Output:   filepath.Dir(encryptedDMG),
 			PemDB:    cfg.PemDB,
 			Proxy:    "",    // TODO: make proxy configurable
 			Insecure: false, // TODO: make insecure configurable
@@ -155,6 +167,7 @@ func DmgInIPSW(path, typ string, cfg *Config) (*Context, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse AEA encrypted DMG: %v", err)
 		}
+		_ = os.Remove(encryptedDMG)
 	}
 	if isEncrypted, err := magic.IsEncryptedDMG(extractedDMG); err != nil {
 		return nil, fmt.Errorf("failed to check if DMG is encrypted: %v", err)

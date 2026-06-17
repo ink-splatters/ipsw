@@ -1,7 +1,7 @@
 ####################################################
 # GOLANG BUILDER
 ####################################################
-FROM golang:1.26.2 AS builder
+FROM golang:1.26.4 AS builder
 
 ARG VERSION
 
@@ -17,7 +17,7 @@ RUN CGO_ENABLED=1 go build \
 ####################################################
 # APFS-FUSE BUILDER
 ####################################################
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 LABEL maintainer="https://github.com/blacktop"
 
@@ -32,9 +32,10 @@ RUN buildDeps='libfuse3-dev bzip2 libbz2-dev libz-dev cmake build-essential git 
     && cd apfs-fuse \
     && git submodule init \
     && git submodule update \
+    && sed -i '/#include <memory>/a #include <cstdint>' ApfsLib/PList.h \
     && mkdir build \
     && cd build \
-    && cmake .. \
+    && cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 .. \
     && make install \
     && echo "===> Clean up unnecessary files..." \
     && apt-get purge -y --auto-remove $buildDeps \

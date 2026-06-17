@@ -128,6 +128,9 @@ func (i *Info) String() string {
 		if fsDMG, err := i.GetAppOsDmg(); err == nil {
 			iStr.WriteString(fmt.Sprintf("AppOS          = %s\n", fsDMG))
 		}
+		if fsDMG, err := i.GetRosettaOsDmg(); err == nil {
+			iStr.WriteString(fmt.Sprintf("RosettaOS      = %s\n", fsDMG))
+		}
 		if fsDMG, err := i.GetExclaveOSDmg(); err == nil {
 			iStr.WriteString(fmt.Sprintf("ExclaveOS      = %s\n", fsDMG))
 		}
@@ -255,25 +258,36 @@ func (i *Info) ToJSON() InfoJSON {
 	}
 }
 
-// GetAppOsDmg returns the name of the AppOS dmg
-func (i *Info) GetAppOsDmg() (string, error) {
+// getCryptexDmg returns the DMG path declared under the given BuildManifest key (e.g. "Cryptex1,AppOS")
+func (i *Info) getCryptexDmg(key, name string) (string, error) {
+	if i.Plists == nil || i.Plists.BuildManifest == nil {
+		return "", fmt.Errorf("no BuildManifest.plist found")
+	}
 	var dmgs []string
-	if i.Plists != nil && i.Plists.BuildManifest != nil {
-		for _, bi := range i.Plists.BuildIdentities {
-			if appOS, ok := bi.Manifest["Cryptex1,AppOS"]; ok {
-				dmgs = append(dmgs, appOS.Info["Path"].(string))
-			}
-		}
-		dmgs = utils.Unique(dmgs)
-		if len(dmgs) == 0 {
-			return "", fmt.Errorf("no AppOS DMG found: %w", ErrorCryptexNotFound)
-		} else if len(dmgs) == 1 {
-			return dmgs[0], nil
-		} else {
-			return "", fmt.Errorf("multiple AppOS DMGs found")
+	for _, bi := range i.Plists.BuildIdentities {
+		if cryptex, ok := bi.Manifest[key]; ok {
+			dmgs = append(dmgs, cryptex.Info["Path"].(string))
 		}
 	}
-	return "", fmt.Errorf("no BuildManifest.plist found")
+	dmgs = utils.Unique(dmgs)
+	switch len(dmgs) {
+	case 0:
+		return "", fmt.Errorf("no %s DMG found: %w", name, ErrorCryptexNotFound)
+	case 1:
+		return dmgs[0], nil
+	default:
+		return "", fmt.Errorf("multiple %s DMGs found", name)
+	}
+}
+
+// GetAppOsDmg returns the name of the AppOS dmg
+func (i *Info) GetAppOsDmg() (string, error) {
+	return i.getCryptexDmg("Cryptex1,AppOS", "AppOS")
+}
+
+// GetRosettaOsDmg returns the name of the RosettaOS dmg (macOS 27+ cryptex)
+func (i *Info) GetRosettaOsDmg() (string, error) {
+	return i.getCryptexDmg("Cryptex1,RosettaOS", "RosettaOS")
 }
 
 // GetSystemOsDmg returns the name of the SystemOS dmg (the one with the dyld_shared_cache(s))
@@ -406,23 +420,7 @@ func (i *Info) GetRestoreRamDiskDmg(ident string) (string, error) {
 }
 
 func (i *Info) GetExclaveOSDmg() (string, error) {
-	var dmgs []string
-	if i.Plists != nil && i.Plists.BuildManifest != nil {
-		for _, bi := range i.Plists.BuildIdentities {
-			if appOS, ok := bi.Manifest["Ap,ExclaveOS"]; ok {
-				dmgs = append(dmgs, appOS.Info["Path"].(string))
-			}
-		}
-		dmgs = utils.Unique(dmgs)
-		if len(dmgs) == 0 {
-			return "", fmt.Errorf("no ExclaveOS DMG found: %w", ErrorCryptexNotFound)
-		} else if len(dmgs) == 1 {
-			return dmgs[0], nil
-		} else {
-			return "", fmt.Errorf("multiple ExclaveOS DMGs found")
-		}
-	}
-	return "", fmt.Errorf("no BuildManifest.plist found")
+	return i.getCryptexDmg("Ap,ExclaveOS", "ExclaveOS")
 }
 
 func (i *Info) IsMacOS() bool {
@@ -603,7 +601,11 @@ func (i *Info) GetKernelCacheFolders(kc string) ([]string, error) {
 
 // GetKernelCacheFileName returns a short new kernelcache name including all the supported devices
 func (i *Info) GetKernelCacheFileName(kc string) string {
-	devList := getAbbreviatedDevList(i.GetDevicesForKernelCache(filepath.Base(kc)))
+	devices := i.GetDevicesForKernelCache(filepath.Base(kc))
+	if i.kernelCacheDeviceListCollides(filepath.Base(kc), devices) {
+		return filepath.Base(kc)
+	}
+	devList := getAbbreviatedDevList(devices)
 	if len(devList) == 0 {
 		return filepath.Base(kc)
 	}
@@ -613,14 +615,28 @@ func (i *Info) GetKernelCacheFileName(kc string) string {
 // GetDevicesForKernelCache returns a sorted array of devices that support the kernelcache
 func (i *Info) GetDevicesForKernelCache(kc string) []string {
 	var devices []string
+	if i.Plists == nil || i.Plists.BuildManifest == nil {
+		return nil
+	}
 
 	for bconf, kcache := range i.Plists.BuildManifest.GetKernelCaches() {
 		if utils.StrSliceHas(kcache, filepath.Base(kc)) {
+			var matchedDeviceTree bool
 			for _, dtree := range i.DeviceTrees {
-				dt, _ := dtree.Summary()
+				if dtree == nil {
+					continue
+				}
+				dt, err := dtree.Summary()
+				if err != nil {
+					continue
+				}
 				if strings.EqualFold(bconf, dt.BoardConfig) {
+					matchedDeviceTree = true
 					devices = append(devices, dt.ProductType)
 				}
+			}
+			if !matchedDeviceTree {
+				devices = append(devices, i.getDevicesForBuildIdentityKernelCache(filepath.Base(kc), bconf)...)
 			}
 		}
 	}
@@ -630,22 +646,122 @@ func (i *Info) GetDevicesForKernelCache(kc string) []string {
 
 // GetKernelCacheForDevice returns the kernelcache path(s) for a given device ProductType (e.g., "Mac16,8", "iPhone17,1")
 func (i *Info) GetKernelCacheForDevice(device string) []string {
+	if i.Plists == nil || i.Plists.BuildManifest == nil {
+		return nil
+	}
+
 	// Find the BoardConfig for this device
 	var boardConfig string
 	for _, dtree := range i.DeviceTrees {
-		dt, _ := dtree.Summary()
+		if dtree == nil {
+			continue
+		}
+		dt, err := dtree.Summary()
+		if err != nil {
+			continue
+		}
 		if dt.ProductType == device {
 			boardConfig = strings.ToLower(dt.BoardConfig)
 			break
 		}
 	}
-	if boardConfig == "" {
+	if boardConfig != "" {
+		// Get kernelcaches for this BoardConfig
+		kcs := i.Plists.BuildManifest.GetKernelCaches()
+		return kcs[boardConfig]
+	}
+
+	return i.getKernelCachesForDeviceFromBuildManifest(device)
+}
+
+func (i *Info) getKernelCachesForDeviceFromBuildManifest(device string) []string {
+	if i.Plists == nil || i.Plists.BuildManifest == nil {
 		return nil
 	}
 
-	// Get kernelcaches for this BoardConfig
-	kcs := i.Plists.BuildManifest.GetKernelCaches()
-	return kcs[boardConfig]
+	var kcs []string
+	singleDeviceIPSW := len(i.Plists.BuildManifest.SupportedProductTypes) == 1 &&
+		strings.EqualFold(i.Plists.BuildManifest.SupportedProductTypes[0], device)
+	for _, ident := range i.Plists.BuildManifest.BuildIdentities {
+		if !singleDeviceIPSW && !strings.EqualFold(ident.ApProductType, device) {
+			continue
+		}
+		kernel, ok := ident.Manifest["KernelCache"]
+		if !ok {
+			continue
+		}
+		path, ok := getIdentityManifestPath(kernel)
+		if !ok {
+			continue
+		}
+		kcs = append(kcs, path)
+	}
+
+	return utils.Unique(kcs)
+}
+
+func (i *Info) getDevicesForBuildIdentityKernelCache(kc, deviceClass string) []string {
+	if i.Plists == nil || i.Plists.BuildManifest == nil {
+		return nil
+	}
+
+	var devices []string
+	for _, ident := range i.Plists.BuildManifest.BuildIdentities {
+		if !strings.EqualFold(ident.Info.DeviceClass, deviceClass) {
+			continue
+		}
+		kernel, ok := ident.Manifest["KernelCache"]
+		if !ok {
+			continue
+		}
+		path, ok := getIdentityManifestPath(kernel)
+		if !ok || filepath.Base(path) != filepath.Base(kc) {
+			continue
+		}
+		if len(ident.ApProductType) > 0 {
+			devices = append(devices, ident.ApProductType)
+		} else if len(i.Plists.BuildManifest.SupportedProductTypes) == 1 {
+			devices = append(devices, i.Plists.BuildManifest.SupportedProductTypes[0])
+		}
+	}
+
+	return devices
+}
+
+func (i *Info) kernelCacheDeviceListCollides(kc string, devices []string) bool {
+	if i.Plists == nil || i.Plists.BuildManifest == nil || len(devices) == 0 {
+		return false
+	}
+
+	seen := make(map[string]struct{})
+	for _, kcaches := range i.Plists.BuildManifest.GetKernelCaches() {
+		for _, otherKC := range kcaches {
+			otherBase := filepath.Base(otherKC)
+			if otherBase == filepath.Base(kc) {
+				continue
+			}
+			if _, ok := seen[otherBase]; ok {
+				continue
+			}
+			seen[otherBase] = struct{}{}
+			if slices.Equal(devices, i.GetDevicesForKernelCache(otherBase)) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func getIdentityManifestPath(manifest plist.IdentityManifest) (string, bool) {
+	if manifest.Info == nil {
+		return "", false
+	}
+	path, ok := manifest.Info["Path"].(string)
+	if !ok || len(path) == 0 {
+		return "", false
+	}
+	return path, true
 }
 
 func getAbbreviatedDevList(devices []string) string {
@@ -715,7 +831,7 @@ func Parse(ipswPath string, keys ...string) (*Info, error) {
 	i.DeviceTrees, err = devicetree.Parse(ipswPath, keys...)
 	if err != nil {
 		if errors.Is(err, devicetree.ErrEncryptedDeviceTree) { // FIXME: this is a hack to avoid stopping the parsing of the metadata info
-			log.Error(err.Error())
+			log.Debug(err.Error())
 		} else {
 			log.Errorf("failed to parse devicetree: %v", err)
 		}
@@ -737,7 +853,7 @@ func ParseZipFiles(files []*zip.File, keys ...string) (*Info, error) {
 	i.DeviceTrees, err = devicetree.ParseZipFiles(files, keys...)
 	if err != nil {
 		if errors.Is(err, devicetree.ErrEncryptedDeviceTree) { // FIXME: this is a hack to avoid stopping the parsing of the metadata info
-			log.Error(err.Error())
+			log.Debug(err.Error())
 		} else {
 			log.Errorf("failed to parse devicetree: %v", err)
 		}
@@ -770,7 +886,7 @@ func ParseOTAFiles(files []fs.File) (*Info, error) {
 			dt, err := devicetree.ParseImg4Data(dat)
 			if err != nil {
 				if errors.Is(err, devicetree.ErrEncryptedDeviceTree) { // FIXME: this is a hack to avoid stopping the parsing of the metadata info
-					log.Error(err.Error())
+					log.Debug(err.Error())
 				} else {
 					log.Errorf("failed to parse devicetree: %v", err)
 				}

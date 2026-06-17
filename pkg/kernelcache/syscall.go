@@ -22,6 +22,81 @@ import (
 	"github.com/blacktop/ipsw/internal/download"
 )
 
+// enosysErrno is the value returned by the xnu enosys() stub: ENOSYS == 78.
+const enosysErrno = 0x4E
+
+// Instruction patterns emitted by clang for the enosys() leaf function and any
+// other syscall whose body is `return ENOSYS;`. Patterns are matched as raw
+// bytes so detection works without a disassembler.
+//
+// ARM64 leaf functions don't sign LR so plain `ret` is expected; arm64e kernels
+// built with `-mbranch-protection=pac-ret+leaf` would emit `retab` instead and
+// silently fall through here. Not currently observed on shipping kernels.
+const (
+	arm64InsnLen        = 4
+	arm64BtiC    uint32 = 0xD503245F // bti c
+	arm64MovW0   uint32 = 0x528009C0 // mov w0, #0x4e (ENOSYS)
+	arm64Ret     uint32 = 0xD65F03C0 // ret
+)
+
+var (
+	// push rbp; mov rbp, rsp; mov eax, 0x4e; pop rbp; ret
+	x86EnosysPlain = [11]byte{0x55, 0x48, 0x89, 0xE5, 0xB8, enosysErrno, 0x00, 0x00, 0x00, 0x5D, 0xC3}
+	// endbr64; push rbp; mov rbp, rsp; mov eax, 0x4e; pop rbp; ret
+	x86Endbr64 = [4]byte{0xF3, 0x0F, 0x1E, 0xFA}
+)
+
+// isEnosys reads the first few instructions at callAddr and returns true if
+// they match a known enosys stub pattern. See arm64BtiC/x86EnosysPlain for the
+// expected sequences.
+func isEnosys(m *macho.File, callAddr uint64) bool {
+	switch m.CPU {
+	case types.CPUArm64:
+		var buf [3 * arm64InsnLen]byte // up to: bti c + mov + ret
+		if _, err := m.ReadAtAddr(buf[:], callAddr); err != nil {
+			return false
+		}
+		return matchEnosysARM64(buf[:])
+	case types.CPUAmd64:
+		var buf [len(x86Endbr64) + len(x86EnosysPlain)]byte
+		if _, err := m.ReadAtAddr(buf[:], callAddr); err != nil {
+			return false
+		}
+		return matchEnosysX86(buf[:])
+	default:
+		return false
+	}
+}
+
+// matchEnosysARM64 reports whether buf starts with the ARM64 enosys pattern
+// `[bti c;] mov w0, #0x4e; ret`. buf must hold at least 3 instructions.
+func matchEnosysARM64(buf []byte) bool {
+	if len(buf) < 3*arm64InsnLen {
+		return false
+	}
+	i0 := binary.LittleEndian.Uint32(buf[0:4])
+	i1 := binary.LittleEndian.Uint32(buf[4:8])
+	i2 := binary.LittleEndian.Uint32(buf[8:12])
+	if i0 == arm64MovW0 && i1 == arm64Ret {
+		return true
+	}
+	return i0 == arm64BtiC && i1 == arm64MovW0 && i2 == arm64Ret
+}
+
+// matchEnosysX86 reports whether buf starts with the x86_64 enosys pattern
+// `[endbr64;] push rbp; mov rbp, rsp; mov eax, 0x4e; pop rbp; ret`.
+func matchEnosysX86(buf []byte) bool {
+	if len(buf) >= len(x86EnosysPlain) && [11]byte(buf[:len(x86EnosysPlain)]) == x86EnosysPlain {
+		return true
+	}
+	prefixed := len(x86Endbr64) + len(x86EnosysPlain)
+	if len(buf) < prefixed {
+		return false
+	}
+	return [4]byte(buf[:len(x86Endbr64)]) == x86Endbr64 &&
+		[11]byte(buf[len(x86Endbr64):prefixed]) == x86EnosysPlain
+}
+
 //go:embed data/syscall.gz
 var syscallData []byte
 
@@ -166,6 +241,26 @@ func getSyscallData() (*SyscallData, error) {
 	return &sdata, nil
 }
 
+func maxBsdSyscallCount(syscalls []BsdSyscall) int {
+	if len(syscalls) == 0 {
+		return 0
+	}
+	maxNumber := 0
+	for _, sc := range syscalls {
+		if sc.Number > maxNumber {
+			maxNumber = sc.Number
+		}
+	}
+	return maxNumber + 1
+}
+
+func shouldStopSysentScan(idx, maxSyscall int, sc sysent) bool {
+	if sc.ReturnType > RET_UINT64_T || sc.ReturnType < RET_NONE {
+		return true
+	}
+	return idx >= maxSyscall && sc.Call == 0
+}
+
 // GetSyscallTable returns a map of system call table as array of sysent structs
 func GetSyscallTable(m *macho.File) (uint64, []Sysent, error) {
 	var syscalls []Sysent
@@ -183,7 +278,7 @@ func GetSyscallTable(m *macho.File) (uint64, []Sysent, error) {
 		return tableAddr, nil, fmt.Errorf("failed to get embedded syscall JSON data: %v", err)
 	}
 
-	maxSyscall = len(sdata.BsdSyscalls)
+	maxSyscall = maxBsdSyscallCount(sdata.BsdSyscalls)
 
 	if m.FileTOC.FileHeader.Type == types.MH_FILESET {
 		var err error
@@ -217,7 +312,7 @@ func GetSyscallTable(m *macho.File) (uint64, []Sysent, error) {
 			// fixup syscall table call/munge addresses
 			for idx, sc := range sysents {
 				isNew := false
-				if sc.ReturnType > RET_UINT64_T || sc.ReturnType < RET_NONE {
+				if shouldStopSysentScan(idx, maxSyscall, sc) {
 					break
 				}
 				sysents[idx].Call = m.SlidePointer(sc.Call)
@@ -230,10 +325,7 @@ func GetSyscallTable(m *macho.File) (uint64, []Sysent, error) {
 				} else if sc.Call == sysnoAddr {
 					name = "nosys"
 				} else {
-					if sysents[idx].Munge == 0 &&
-						sysents[idx].ReturnType == RET_INT_T &&
-						sysents[idx].NArg == 0 &&
-						sysents[idx].ArgBytes == 0 {
+					if isEnosys(m, sysents[idx].Call) {
 						name = "enosys"
 					} else {
 						name = unknownTrap
@@ -255,11 +347,16 @@ func GetSyscallTable(m *macho.File) (uint64, []Sysent, error) {
 					}
 				}
 
+				var args []string
+				if err == nil && sysents[idx].NArg != 0 && name != "enosys" && name != "nosys" {
+					args = []string(sc.Arguments)
+				}
+
 				syscalls = append(syscalls, Sysent{
 					Number: idx,
 					Name:   name,
 					DBName: sc.Name,
-					Args:   sc.Arguments,
+					Args:   args,
 					New:    isNew,
 					Old:    sc.Old,
 					sysent: sysents[idx],

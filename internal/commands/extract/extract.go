@@ -4,6 +4,7 @@ package extract
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/aes"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AlecAivazis/survey/v2"
+	"github.com/AlecAivazis/survey/v2/terminal"
 	"github.com/apex/log"
 	"github.com/blacktop/go-macho"
 	fwcmd "github.com/blacktop/ipsw/internal/commands/fw"
@@ -33,7 +36,32 @@ import (
 	"github.com/blacktop/ipsw/pkg/kernelcache"
 	"github.com/blacktop/ipsw/pkg/ota"
 	"github.com/blacktop/ipsw/pkg/plist"
+	"golang.org/x/term"
 )
+
+var ErrNoDecryptionKey = errors.New("no decryption key found")
+
+type remoteKernelcacheMember struct {
+	file    *zip.File
+	devices []string
+	output  string
+	// iv/key are populated when a wiki key matches the member; payload is populated
+	// when the member was peeked and found unencrypted (already decompressed).
+	iv      []byte
+	key     []byte
+	payload []byte
+}
+
+type remoteReaderCache struct {
+	client       *http.Client
+	readers      map[int]*zip.Reader
+	url          string
+	proxy        string
+	insecure     bool
+	folder       string
+	folderDevice string
+	folderSet    bool
+}
 
 // Config is the extract command configuration.
 type Config struct {
@@ -58,7 +86,7 @@ type Config struct {
 	// search the DMGs for files
 	DMGs bool `json:"dmgs,omitempty"`
 	// type of DMG to extract
-	// pattern: (app|sys|fs)
+	// pattern: (app|sys|fs|exc|rdisk|rosetta)
 	DmgType string `json:"dmg_type,omitempty"`
 	// flatten the extracted files paths (remove the folders)
 	Flatten bool `json:"flatten,omitempty"`
@@ -76,13 +104,19 @@ type Config struct {
 	JSON bool `json:"json,omitempty"`
 	// show info
 	Info bool `json:"info,omitempty"`
+	// interactively prompt the user to pick which matching files to extract
+	Prompt bool `json:"-"`
 	// Lookup decryption keys from theapplewiki.com
 	Lookup bool `json:"lookup,omitempty"`
+	// FirmwareKeys are caller-provided decryption keys from theapplewiki.com
+	FirmwareKeys download.WikiFWKeys `json:"-"`
 	// BuildManifest identity selector (used for rdisk)
 	Ident string `json:"ident,omitempty"`
 
 	info     *info.Info
 	wikiKeys download.WikiFWKeys
+
+	remote remoteReaderCache
 }
 
 func isURL(str string) bool {
@@ -96,37 +130,20 @@ func decryptExtractedIM4P(extractedPath string, wikiKeys download.WikiFWKeys) (s
 	if wikiKeys == nil {
 		return extractedPath, nil
 	}
-	// Get key by filename
-	keyStr, err := wikiKeys.GetKeyByFilename(extractedPath)
-	if err != nil {
-		log.Debugf("no key found for %s: %v", filepath.Base(extractedPath), err)
-		return extractedPath, nil // Not an error, just no key available
-	}
-	// Parse IV and Key from combined hex string (IV is first 32 chars, key is rest)
-	if len(keyStr) < 64 { // 32 hex for IV + at least 32 hex for key
-		log.Warnf("key string too short for %s", filepath.Base(extractedPath))
-		return extractedPath, nil
-	}
-	ivHex := keyStr[:32]
-	keyHex := keyStr[32:]
-
-	iv, err := hex.DecodeString(ivHex)
-	if err != nil {
-		return extractedPath, fmt.Errorf("failed to decode IV: %v", err)
-	}
-	key, err := hex.DecodeString(keyHex)
-	if err != nil {
-		return extractedPath, fmt.Errorf("failed to decode key: %v", err)
-	}
 
 	// Create decrypted output file without the .im4p/.img3 extension
 	// e.g., DeviceTree.n51ap.im4p -> DeviceTree.n51ap
 	decryptedPath := strings.TrimSuffix(extractedPath, filepath.Ext(extractedPath))
 
-	log.Infof("Decrypting %s", filepath.Base(extractedPath))
-	if err := img4.DecryptPayload(extractedPath, decryptedPath, iv, key); err != nil {
+	decrypted, err := DecryptPayloadWithKeys(extractedPath, decryptedPath, wikiKeys)
+	if err != nil {
 		return extractedPath, fmt.Errorf("failed to decrypt %s: %v", filepath.Base(extractedPath), err)
 	}
+	if !decrypted {
+		log.Debugf("no key found for %s", filepath.Base(extractedPath))
+		return extractedPath, nil
+	}
+	log.Infof("Decrypting %s", filepath.Base(extractedPath))
 
 	// Remove original encrypted file
 	if err := os.Remove(extractedPath); err != nil {
@@ -134,6 +151,80 @@ func decryptExtractedIM4P(extractedPath string, wikiKeys download.WikiFWKeys) (s
 	}
 
 	return decryptedPath, nil
+}
+
+// DecryptPayloadWithKeys decrypts an extracted IM4P/IMG3 payload if a matching wiki key exists.
+func DecryptPayloadWithKeys(inputPath, outputPath string, wikiKeys download.WikiFWKeys) (bool, error) {
+	iv, key, ok, err := firmwareKeyForFile(wikiKeys, inputPath)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0750); err != nil {
+		return false, fmt.Errorf("failed to create output directory: %v", err)
+	}
+	if err := img4.DecryptPayload(inputPath, outputPath, iv, key); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func firmwareKeyForFile(wikiKeys download.WikiFWKeys, filename string) ([]byte, []byte, bool, error) {
+	if wikiKeys == nil {
+		return nil, nil, false, nil
+	}
+	for _, fwKey := range wikiKeys {
+		for idx, keyFilename := range fwKey.Filename {
+			if !firmwareKeyFilenameMatches(filename, keyFilename) {
+				continue
+			}
+			iv, key, ok, err := decodeFirmwareKeyMaterial(fwKey, idx)
+			if err != nil || ok {
+				return iv, key, ok, err
+			}
+		}
+	}
+	return nil, nil, false, nil
+}
+
+func firmwareKeyFilenameMatches(path, keyFilename string) bool {
+	if len(keyFilename) == 0 {
+		return false
+	}
+	normalizedPath := strings.ToLower(strings.ReplaceAll(path, " ", "_"))
+	normalizedKeyFilename := strings.ToLower(strings.ReplaceAll(keyFilename, " ", "_"))
+	return strings.HasSuffix(normalizedPath, normalizedKeyFilename)
+}
+
+func decodeFirmwareKeyMaterial(fwKey download.WikiFWKey, idx int) ([]byte, []byte, bool, error) {
+	if idx < len(fwKey.Iv) && idx < len(fwKey.Key) && isKnownKeyPart(fwKey.Iv[idx]) && isKnownKeyPart(fwKey.Key[idx]) {
+		iv, err := hex.DecodeString(fwKey.Iv[idx])
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("failed to decode iv: %v", err)
+		}
+		key, err := hex.DecodeString(fwKey.Key[idx])
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("failed to decode key: %v", err)
+		}
+		return iv, key, true, nil
+	}
+	if idx < len(fwKey.Kbag) && isKnownKeyPart(fwKey.Kbag[idx]) {
+		kbag, err := hex.DecodeString(fwKey.Kbag[idx])
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("failed to decode kbag: %v", err)
+		}
+		if len(kbag) <= aes.BlockSize {
+			return nil, nil, false, fmt.Errorf("kbag is too short: %d bytes", len(kbag))
+		}
+		return kbag[:aes.BlockSize], kbag[aes.BlockSize:], true, nil
+	}
+	return nil, nil, false, nil
+}
+
+func isKnownKeyPart(value string) bool {
+	return len(value) > 0 && !strings.EqualFold(value, "Unknown")
 }
 
 func getFolder(c *Config) (*info.Info, string, error) {
@@ -175,10 +266,11 @@ func getFolder(c *Config) (*info.Info, string, error) {
 }
 
 func getRemoteFolder(c *Config) (*info.Info, *zip.Reader, string, error) {
-	zr, err := download.NewRemoteZipReader(c.URL, &download.RemoteConfig{
-		Proxy:    c.Proxy,
-		Insecure: c.Insecure,
-	})
+	return getRemoteFolderWithBlockSize(c, 0)
+}
+
+func getRemoteFolderWithBlockSize(c *Config, blockSize int) (*info.Info, *zip.Reader, string, error) {
+	zr, err := c.remoteZipReader(blockSize)
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("unable to download remote zip: %v", err)
 	}
@@ -208,11 +300,116 @@ func getRemoteFolder(c *Config) (*info.Info, *zip.Reader, string, error) {
 			}
 		}
 	}
-	folder, err := c.info.GetFolder(c.KernelDevice)
-	if err != nil {
-		return nil, nil, "", fmt.Errorf("failed to get folder from remote zip metadata: %v", err)
+	if !c.remote.folderSet || c.remote.folderDevice != c.KernelDevice {
+		folder, err := c.info.GetFolder(c.KernelDevice)
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("failed to get folder from remote zip metadata: %v", err)
+		}
+		c.remote.folder = folder
+		c.remote.folderDevice = c.KernelDevice
+		c.remote.folderSet = true
 	}
-	return c.info, zr, folder, nil
+	return c.info, zr, c.remote.folder, nil
+}
+
+func (c *Config) remoteZipReader(blockSize int) (*zip.Reader, error) {
+	c.resetRemoteReaderCacheIfNeeded()
+	blockSize = download.NormalizeRemoteZipBlockSize(blockSize)
+	if c.remote.readers == nil {
+		c.remote.readers = make(map[int]*zip.Reader)
+	}
+	if zr := c.remote.readers[blockSize]; zr != nil {
+		return zr, nil
+	}
+	zr, err := download.NewRemoteZipReader(c.URL, &download.RemoteConfig{
+		Proxy:     c.Proxy,
+		Insecure:  c.Insecure,
+		Client:    c.remoteHTTPClient(),
+		BlockSize: blockSize,
+	})
+	if err != nil {
+		return nil, err
+	}
+	c.remote.readers[blockSize] = zr
+	return zr, nil
+}
+
+func (c *Config) resetRemoteReaderCacheIfNeeded() {
+	if c.remote.url == c.URL && c.remote.proxy == c.Proxy && c.remote.insecure == c.Insecure {
+		return
+	}
+	c.Close()
+	c.remote = remoteReaderCache{
+		url:      c.URL,
+		proxy:    c.Proxy,
+		insecure: c.Insecure,
+	}
+	c.info = nil
+	c.wikiKeys = nil
+}
+
+// Close closes idle remote HTTP connections held by the config.
+func (c *Config) Close() {
+	if c == nil || c.remote.client == nil {
+		return
+	}
+	c.remote.client.CloseIdleConnections()
+}
+
+func (c *Config) remoteHTTPClient() *http.Client {
+	if c.remote.client == nil {
+		c.remote.client = download.NewRemoteHTTPClient(c.Proxy, c.Insecure)
+	}
+	return c.remote.client
+}
+
+func tuneRemoteZipReader(c *Config, zr *zip.Reader, files []*zip.File) (*zip.Reader, error) {
+	blockSize := download.RemoteZipBlockSizeForFiles(files)
+	if blockSize <= download.DefaultRemoteZipBlockSize {
+		return zr, nil
+	}
+	_, tuned, _, err := getRemoteFolderWithBlockSize(c, blockSize)
+	if err != nil {
+		return nil, err
+	}
+	return tuned, nil
+}
+
+func exactZipNamePattern(name string) *regexp.Regexp {
+	return regexp.MustCompile("^" + regexp.QuoteMeta(name) + "$")
+}
+
+func keybagZipFiles(files []*zip.File, pattern string) ([]*zip.File, error) {
+	if len(pattern) == 0 {
+		pattern = `.*im4p$`
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compile --pattern regexp: %v", err)
+	}
+	return matchingZipFiles(files, re), nil
+}
+
+func matchingZipFiles(files []*zip.File, pattern *regexp.Regexp) []*zip.File {
+	matches := make([]*zip.File, 0)
+	for _, file := range files {
+		if file.FileInfo().IsDir() || !pattern.MatchString(file.Name) {
+			continue
+		}
+		matches = append(matches, file)
+	}
+	return matches
+}
+
+func matchingZipFileName(files []*zip.File, name string) []*zip.File {
+	matches := make([]*zip.File, 0)
+	for _, file := range files {
+		if file.FileInfo().IsDir() || file.Name != name {
+			continue
+		}
+		matches = append(matches, file)
+	}
+	return matches
 }
 
 func ExtractFromDMG(ipswPath, dmgPath, destPath, pemDB string, pattern *regexp.Regexp) ([]string, error) {
@@ -432,13 +629,168 @@ func Kernelcache(c *Config) (map[string][]string, error) {
 		if !isURL(c.URL) {
 			return nil, fmt.Errorf("invalid URL provided: %s", c.URL)
 		}
-		_, zr, folder, err := getRemoteFolder(c)
+		i, zr, folder, err := getRemoteFolder(c)
 		if err != nil {
 			return nil, err
 		}
-		return kernelcache.RemoteParse(zr, filepath.Join(filepath.Clean(c.Output), folder), c.KernelDevice)
+		destPath := filepath.Join(filepath.Clean(c.Output), folder)
+		zr, err = tuneRemoteZipReader(c, zr, remoteKernelcacheCandidates(i, zr.File, destPath, c.KernelDevice))
+		if err != nil {
+			return nil, err
+		}
+		keys := c.FirmwareKeys
+		if len(keys) == 0 {
+			keys = c.wikiKeys
+		}
+		if len(keys) > 0 {
+			return remoteKernelcacheWithKeys(i, zr, destPath, c.KernelDevice, keys, c.Progress)
+		}
+		return kernelcache.RemoteParseWithInfo(i, zr, destPath, c.KernelDevice)
 	}
 	return nil, fmt.Errorf("no IPSW or URL provided")
+}
+
+func remoteKernelcacheWithKeys(i *info.Info, zr *zip.Reader, destPath, device string, wikiKeys download.WikiFWKeys, progress bool) (map[string][]string, error) {
+	tmpDIR, err := os.MkdirTemp("", "ipsw_extract_kcache")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temporary directory to store kernelcache: %v", err)
+	}
+	defer os.RemoveAll(tmpDIR)
+
+	artifacts := make(map[string][]string)
+	selected, err := selectRemoteKernelcacheMembers(i, zr.File, destPath, device, wikiKeys)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, kc := range selected {
+		if err := os.MkdirAll(filepath.Dir(kc.output), 0750); err != nil {
+			return nil, fmt.Errorf("failed to create output directory: %v", err)
+		}
+
+		if kc.payload != nil {
+			if err := os.WriteFile(kc.output, kc.payload, 0660); err != nil {
+				return nil, fmt.Errorf("failed to write kernelcache %s: %v", kc.file.Name, err)
+			}
+			artifacts[kc.output] = kc.devices
+			continue
+		}
+
+		extracted, err := utils.SearchZip([]*zip.File{kc.file}, regexp.MustCompile("^"+regexp.QuoteMeta(kc.file.Name)+"$"), tmpDIR, true, progress)
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract kernelcache %s: %v", kc.file.Name, err)
+		}
+		if len(extracted) == 0 {
+			return nil, fmt.Errorf("failed to extract kernelcache %s", kc.file.Name)
+		}
+		if err := img4.DecryptPayload(extracted[0], kc.output, kc.iv, kc.key); err != nil {
+			return nil, fmt.Errorf("failed to decrypt kernelcache %s: %v", kc.file.Name, err)
+		}
+		artifacts[kc.output] = kc.devices
+	}
+
+	return artifacts, nil
+}
+
+func readZipMember(f *zip.File) ([]byte, error) {
+	rc, err := f.Open()
+	if err != nil {
+		return nil, fmt.Errorf("failed to open zip member %s: %v", f.Name, err)
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read zip member %s: %v", f.Name, err)
+	}
+	return data, nil
+}
+
+func remoteKernelcacheCandidates(i *info.Info, files []*zip.File, destPath, device string) []*zip.File {
+	matches := make([]*zip.File, 0)
+	for _, file := range files {
+		if file.FileInfo().IsDir() || !strings.Contains(file.Name, "kernelcache.") {
+			continue
+		}
+		devices := i.GetDevicesForKernelCache(file.Name)
+		if len(device) > 0 && !slices.Contains(devices, device) {
+			continue
+		}
+		fname := filepath.Join(destPath, filepath.Clean(i.GetKernelCacheFileName(file.Name)))
+		if _, err := os.Stat(fname); err == nil {
+			continue
+		}
+		matches = append(matches, file)
+	}
+	return matches
+}
+
+func selectRemoteKernelcacheMembers(i *info.Info, files []*zip.File, destPath, device string, wikiKeys download.WikiFWKeys) ([]remoteKernelcacheMember, error) {
+	var selected []remoteKernelcacheMember
+	var missingKeys []string
+	var foundKernelcache bool
+
+	for _, f := range files {
+		if !strings.Contains(f.Name, "kernelcache.") {
+			continue
+		}
+		devices := i.GetDevicesForKernelCache(f.Name)
+		if len(device) > 0 && !slices.Contains(devices, device) {
+			continue
+		}
+		foundKernelcache = true
+
+		fname := filepath.Join(destPath, filepath.Clean(i.GetKernelCacheFileName(f.Name)))
+		if _, err := os.Stat(fname); err == nil {
+			log.Warnf("kernelcache already exists: %s", fname)
+			continue
+		}
+
+		iv, key, ok, err := firmwareKeyForFile(wikiKeys, f.Name)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve key for kernelcache %s: %w", f.Name, err)
+		}
+
+		var payload []byte
+		if !ok {
+			data, err := readZipMember(f)
+			if err != nil {
+				return nil, err
+			}
+			cc, err := kernelcache.ParseImg4Data(data)
+			if errors.Is(err, kernelcache.ErrEncryptedKernelCache) {
+				missingKeys = append(missingKeys, f.Name)
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse kernelcache %s: %v", f.Name, err)
+			}
+			payload, err = kernelcache.DecompressData(cc)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decompress kernelcache %s: %v", f.Name, err)
+			}
+		}
+
+		selected = append(selected, remoteKernelcacheMember{
+			file:    f,
+			devices: devices,
+			output:  fname,
+			iv:      iv,
+			key:     key,
+			payload: payload,
+		})
+	}
+
+	if !foundKernelcache {
+		if len(device) > 0 {
+			return nil, fmt.Errorf("no kernelcache found for device %s in IPSW", device)
+		}
+		return nil, fmt.Errorf("no kernelcache found in IPSW")
+	}
+	if len(missingKeys) > 0 {
+		return nil, fmt.Errorf("%w for %s", ErrNoDecryptionKey, strings.Join(missingKeys, ", "))
+	}
+
+	return selected, nil
 }
 
 // SPTM extracts the SPTM firmware from an IPSW
@@ -512,12 +864,7 @@ func SPTM(c *Config) ([]string, error) {
 }
 
 func Exclave(c *Config) ([]string, error) {
-	var (
-		err      error
-		tmpOut   []string
-		outfiles []string
-		excs     [][]byte
-	)
+	var outfiles []string
 
 	tmpDIR, err := os.MkdirTemp("", "ipsw_extract_exclave")
 	if err != nil {
@@ -533,12 +880,56 @@ func Exclave(c *Config) ([]string, error) {
 	if len(out) == 0 {
 		return nil, fmt.Errorf("no Exclave bundles found")
 	}
-	tmpOut = append(tmpOut, out...)
 
-	for _, f := range tmpOut {
-		if strings.Contains(f, ".restore.") {
-			continue // TODO: skip restore bundles for now
+	interactive := c.Prompt && len(out) > 1 &&
+		term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+
+	var bundles []string
+	if interactive {
+		choices := make([]string, len(out))
+		var defaults []int
+		for i, f := range out {
+			choices[i] = filepath.Base(f)
+			if !strings.Contains(f, ".restore.") {
+				defaults = append(defaults, i)
+			}
 		}
+		var selected []int
+		prompt := &survey.MultiSelect{
+			Message: "Select which Exclave bundle(s) to extract:",
+			Options: choices,
+			Default: defaults,
+		}
+		if err := survey.AskOne(prompt, &selected); err != nil {
+			if errors.Is(err, terminal.InterruptErr) {
+				log.Warn("Exiting...")
+				os.RemoveAll(tmpDIR) // deferred cleanup doesn't run on os.Exit
+				os.Exit(0)
+			}
+			return nil, fmt.Errorf("failed to prompt for Exclave bundle selection: %v", err)
+		}
+		if len(selected) == 0 {
+			return nil, fmt.Errorf("no Exclave bundles selected")
+		}
+		for _, idx := range selected {
+			bundles = append(bundles, out[idx])
+		}
+	} else {
+		for _, f := range out {
+			if strings.Contains(f, ".restore.") {
+				log.Debugf("Skipping restore Exclave bundle %s", filepath.Base(f))
+				continue
+			}
+			bundles = append(bundles, f)
+		}
+		if len(bundles) == 0 {
+			return nil, fmt.Errorf("no Exclave bundles to extract (all %d matches are restore bundles)", len(out))
+		}
+	}
+
+	outDir := filepath.Clean(c.Output)
+
+	for _, f := range bundles {
 		im4p, err := img4.OpenPayload(f)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse '%s': %v", f, err)
@@ -547,32 +938,30 @@ func Exclave(c *Config) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to get data from '%s': %v", f, err)
 		}
-		if !c.Info {
-			// save BUND file
-			baseName := strings.TrimSuffix(filepath.Base(f), filepath.Ext(f))
-			excFile := filepath.Join(filepath.Clean(c.Output), baseName)
-			if err := os.MkdirAll(filepath.Dir(excFile), 0o750); err != nil {
-				return nil, fmt.Errorf("failed to create output directory '%s': %v", excFile, err)
-			}
-			if err := os.WriteFile(excFile, excData, 0o644); err != nil {
-				return nil, fmt.Errorf("failed to write '%s': %v", excFile, err)
-			}
-			outfiles = append(outfiles, excFile)
-		}
-		// append to exclave cores for kernel/app extraction
-		excs = append(excs, excData)
-	}
-
-	for _, exc := range excs {
 		if c.Info {
-			fwcmd.ShowExclaveCores(exc)
+			fwcmd.ShowExclaveCores(excData)
 			continue
 		}
-		out, err := fwcmd.ExtractExclaveCores(exc, filepath.Clean(c.Output))
+		baseName := strings.TrimSuffix(filepath.Base(f), filepath.Ext(f))
+		folder := outDir
+		if len(bundles) > 1 {
+			// bundles contain identically named files (e.g. SYSTEM/kernel); keep them separate
+			folder = filepath.Join(folder, baseName)
+		}
+		if err := os.MkdirAll(folder, 0o750); err != nil {
+			return nil, fmt.Errorf("failed to create output directory '%s': %v", folder, err)
+		}
+		// save BUND file
+		excFile := filepath.Join(folder, baseName)
+		if err := os.WriteFile(excFile, excData, 0o644); err != nil {
+			return nil, fmt.Errorf("failed to write '%s': %v", excFile, err)
+		}
+		outfiles = append(outfiles, excFile)
+		cores, err := fwcmd.ExtractExclaveCores(excData, folder)
 		if err != nil {
 			return nil, fmt.Errorf("failed to extract files from exclave bundle: %v", err)
 		}
-		outfiles = append(outfiles, out...)
+		outfiles = append(outfiles, cores...)
 	}
 
 	if c.Info {
@@ -600,6 +989,10 @@ func DSC(c *Config) ([]string, error) {
 		}
 		if i.Plists.Type == "OTA" {
 			if runtime.GOOS == "darwin" {
+				zr, err = tuneRemoteZipReader(c, zr, dyld.RemoteCryptexFiles(zr.File, c.Arches))
+				if err != nil {
+					return nil, err
+				}
 				out, err := dyld.ExtractFromRemoteCryptex(zr, filepath.Join(filepath.Clean(c.Output), folder), c.PemDB, c.Arches, c.DriverKit, c.AllDSCs)
 				if err != nil {
 					if errors.Is(err, dyld.ErrNoCryptex) {
@@ -618,6 +1011,10 @@ func DSC(c *Config) ([]string, error) {
 							if regexp.MustCompile(c.Pattern).MatchString(f.Name()) {
 								dcaches = append(dcaches, f.Name())
 							}
+						}
+						zr, err = tuneRemoteZipReader(c, zr, matchingZipFiles(zr.File, regexp.MustCompile(`payload\.0\d+$`)))
+						if err != nil {
+							return nil, err
 						}
 						out, err = ota.RemoteExtract(zr, c.Pattern, filepath.Join(filepath.Clean(c.Output), folder), func(s string) bool {
 							s = strings.TrimPrefix(s, folder+string(os.PathSeparator))
@@ -640,24 +1037,88 @@ func DSC(c *Config) ([]string, error) {
 			}
 			return nil, fmt.Errorf("extracting dyld_shared_cache from remote OTA is only supported on macOS")
 		}
-		sysDMG, err := i.GetSystemOsDmg()
+		steps, err := dyld.DscExtractionPlan(i, c.Arches, c.DriverKit)
 		if err != nil {
-			return nil, fmt.Errorf("only iOS16.x/macOS13.x+ supported: failed to get SystemOS DMG from remote zip metadata: %v", err)
+			return nil, err
 		}
-		if len(sysDMG) == 0 {
-			return nil, fmt.Errorf("only iOS16.x/macOS13.x+ supported: no SystemOS DMG found in remote zip metadata")
+		var out []string
+		var emptyErr error
+		for _, step := range steps {
+			dmgPath, err := remoteDmgPathForDscStep(i, step.Kind)
+			if err != nil {
+				return nil, err
+			}
+			stepOut, err := extractRemoteDscDMG(c, i, zr, dmgPath, folder, step.Arches)
+			if err != nil {
+				if step.AllowEmpty && dyld.IsDscNotFound(err) {
+					if emptyErr == nil {
+						emptyErr = err
+					}
+					log.Debugf("No matching dyld_shared_cache(s) in optional %s DMG; continuing", step.Kind)
+					continue
+				}
+				return nil, err
+			}
+			if stepOut == nil {
+				// nil output with no error means the user interrupted the
+				// interactive cache selection; don't prompt for remaining DMGs
+				return out, nil
+			}
+			out = append(out, stepOut...)
 		}
-		tmpDIR, err := os.MkdirTemp("", "ipsw_extract_remote_dyld")
-		if err != nil {
-			return nil, fmt.Errorf("failed to create temporary directory to store SystemOS DMG: %v", err)
+		if len(out) == 0 && emptyErr != nil {
+			return nil, emptyErr
 		}
-		defer os.RemoveAll(tmpDIR)
-		if _, err := utils.SearchZip(zr.File, regexp.MustCompile(fmt.Sprintf("^%s$", sysDMG)), tmpDIR, c.Flatten, true); err != nil {
-			return nil, fmt.Errorf("failed to extract SystemOS DMG from remote IPSW: %v", err)
-		}
-		return dyld.ExtractFromDMG(i, filepath.Join(tmpDIR, sysDMG), filepath.Join(filepath.Clean(c.Output), folder), c.PemDB, c.Arches, c.DriverKit, c.AllDSCs)
+		return out, nil
 	}
 	return nil, fmt.Errorf("no IPSW or URL provided")
+}
+
+func remoteDmgPathForDscStep(i *info.Info, kind dyld.DscDMGKind) (string, error) {
+	switch kind {
+	case dyld.RosettaOSDscDMG:
+		dmgPath, err := i.GetRosettaOsDmg()
+		if err != nil {
+			return "", fmt.Errorf("failed to get RosettaOS DMG containing the x86_64 dyld_shared_cache(s) from remote zip metadata: %v", err)
+		}
+		return dmgPath, nil
+	case dyld.SystemOSDscDMG:
+		return remoteSystemDscDMG(i)
+	default:
+		return "", fmt.Errorf("unsupported dyld_shared_cache DMG kind: %s", kind)
+	}
+}
+
+func remoteSystemDscDMG(i *info.Info) (string, error) {
+	sysDMG, err := i.GetSystemOsDmg()
+	if err != nil {
+		return "", fmt.Errorf("only iOS16.x/macOS13.x+ supported: failed to get SystemOS DMG from remote zip metadata: %v", err)
+	}
+	if len(sysDMG) == 0 {
+		return "", fmt.Errorf("only iOS16.x/macOS13.x+ supported: no SystemOS DMG found in remote zip metadata")
+	}
+	return sysDMG, nil
+}
+
+func extractRemoteDscDMG(c *Config, i *info.Info, zr *zip.Reader, dmgPath, folder string, arches []string) ([]string, error) {
+	stepZr, err := tuneRemoteZipReader(c, zr, matchingZipFileName(zr.File, dmgPath))
+	if err != nil {
+		return nil, err
+	}
+	tmpDIR, err := os.MkdirTemp("", "ipsw_extract_remote_dyld")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temporary directory to store %s: %v", dmgPath, err)
+	}
+	defer os.RemoveAll(tmpDIR)
+	dmgRegex := exactZipNamePattern(dmgPath)
+	extracted, err := utils.SearchZip(stepZr.File, dmgRegex, tmpDIR, c.Flatten, true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract %s from remote IPSW: %v", dmgPath, err)
+	}
+	if len(extracted) == 0 {
+		return nil, fmt.Errorf("failed to extract DMG %s from remote IPSW", dmgPath)
+	}
+	return dyld.ExtractFromDMG(i, extracted[0], filepath.Join(filepath.Clean(c.Output), folder), c.PemDB, arches, c.DriverKit, c.AllDSCs)
 }
 
 // DMG extracts the DMG from an IPSW
@@ -726,12 +1187,26 @@ func DMG(c *Config) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to find RestoreRamDisk DMG in IPSW: %v", err)
 		}
+	case "rosetta":
+		dmgPath, err = i.GetRosettaOsDmg()
+		if err != nil {
+			return nil, fmt.Errorf("failed to find RosettaOS DMG in IPSW: %v", err)
+		}
+	default:
+		return nil, fmt.Errorf("unknown DMG type %q", c.DmgType)
 	}
 
-	return utils.SearchZip(zr.File, regexp.MustCompile(dmgPath), filepath.Join(filepath.Clean(c.Output), folder), c.Flatten, c.Progress)
+	dmgRegex := exactZipNamePattern(dmgPath)
+	if len(c.URL) > 0 {
+		zr, err = tuneRemoteZipReader(c, zr, matchingZipFileName(zr.File, dmgPath))
+		if err != nil {
+			return nil, err
+		}
+	}
+	return utils.SearchZip(zr.File, dmgRegex, filepath.Join(filepath.Clean(c.Output), folder), c.Flatten, c.Progress)
 }
 
-func extractRemoteDMG(files []*zip.File, dmgPath, destPath, pemDB string, pattern *regexp.Regexp) ([]string, error) {
+func extractRemoteDMG(c *Config, zr *zip.Reader, dmgPath, destPath, pemDB string, pattern *regexp.Regexp) ([]string, error) {
 	if dmgPath == "" {
 		return nil, nil
 	}
@@ -742,8 +1217,12 @@ func extractRemoteDMG(files []*zip.File, dmgPath, destPath, pemDB string, patter
 	}
 	defer os.RemoveAll(tmpDIR)
 
-	dmgRegex := regexp.MustCompile(fmt.Sprintf("^%s$", regexp.QuoteMeta(dmgPath)))
-	extracted, err := utils.SearchZip(files, dmgRegex, tmpDIR, false, true)
+	dmgRegex := exactZipNamePattern(dmgPath)
+	tuned, err := tuneRemoteZipReader(c, zr, matchingZipFileName(zr.File, dmgPath))
+	if err != nil {
+		return nil, err
+	}
+	extracted, err := utils.SearchZip(tuned.File, dmgRegex, tmpDIR, false, true)
 	if err != nil {
 		return nil, err
 	}
@@ -795,6 +1274,14 @@ func Keybags(c *Config) (fname string, err error) {
 			return "", fmt.Errorf("invalid URL provided: %s", c.URL)
 		}
 		i, zr, folder, err = getRemoteFolder(c)
+		if err != nil {
+			return "", err
+		}
+		matches, err := keybagZipFiles(zr.File, c.Pattern)
+		if err != nil {
+			return "", fmt.Errorf("failed to parse im4p kbags: %v", err)
+		}
+		zr, err = tuneRemoteZipReader(c, zr, matches)
 		if err != nil {
 			return "", err
 		}
@@ -889,7 +1376,7 @@ func FcsKeys(c *Config) ([]string, error) {
 		return nil, fmt.Errorf("fcs-keys are only found in AEA1 DMGs: found '%s'", filepath.Base(dmgPath))
 	}
 
-	out, err := utils.SearchPartialZip(zr.File, regexp.MustCompile(dmgPath+`$`), os.TempDir(), 0x1000, false, false)
+	out, err := utils.SearchPartialZip(zr.File, exactZipNamePattern(dmgPath), os.TempDir(), 0x1000, false, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract fcs-keys from DMG: %v", err)
 	}
@@ -1043,6 +1530,10 @@ func Search(c *Config, tempDirectory ...string) ([]string, error) {
 		if c.Output == "" {
 			destPath = folder
 		}
+		zr, err = tuneRemoteZipReader(c, zr, matchingZipFiles(zr.File, re))
+		if err != nil {
+			return nil, err
+		}
 		out, err := utils.SearchZip(zr.File, re, destPath, c.Flatten, true)
 		if err != nil && !c.DMGs {
 			return nil, fmt.Errorf("failed to extract files matching pattern '%s' in remote IPSW: %v", c.Pattern, err)
@@ -1050,28 +1541,28 @@ func Search(c *Config, tempDirectory ...string) ([]string, error) {
 		artifacts = append(artifacts, out...)
 		if c.DMGs { // SEARCH THE DMGs
 			if appOS, err := i.GetAppOsDmg(); err == nil {
-				out, err := extractRemoteDMG(zr.File, appOS, destPath, c.PemDB, re)
+				out, err := extractRemoteDMG(c, zr, appOS, destPath, c.PemDB, re)
 				if err != nil {
 					return nil, fmt.Errorf("failed to extract files from AppOS %s: %v", appOS, err)
 				}
 				artifacts = append(artifacts, out...)
 			}
 			if systemOS, err := i.GetSystemOsDmg(); err == nil {
-				out, err := extractRemoteDMG(zr.File, systemOS, destPath, c.PemDB, re)
+				out, err := extractRemoteDMG(c, zr, systemOS, destPath, c.PemDB, re)
 				if err != nil {
 					return nil, fmt.Errorf("failed to extract files from SystemOS %s: %v", systemOS, err)
 				}
 				artifacts = append(artifacts, out...)
 			}
 			if fsOS, err := i.GetFileSystemOsDmg(); err == nil {
-				out, err := extractRemoteDMG(zr.File, fsOS, destPath, c.PemDB, re)
+				out, err := extractRemoteDMG(c, zr, fsOS, destPath, c.PemDB, re)
 				if err != nil {
 					return nil, fmt.Errorf("failed to extract files from filesystem %s: %v", fsOS, err)
 				}
 				artifacts = append(artifacts, out...)
 			}
 			if excOS, err := i.GetExclaveOSDmg(); err == nil {
-				out, err := extractRemoteDMG(zr.File, excOS, destPath, c.PemDB, re)
+				out, err := extractRemoteDMG(c, zr, excOS, destPath, c.PemDB, re)
 				if err != nil {
 					return nil, fmt.Errorf("failed to extract files from ExclaveOS %s: %v", excOS, err)
 				}

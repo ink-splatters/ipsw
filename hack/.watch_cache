@@ -80,7 +80,30 @@
       "0bf7411f79883b90e0571fc0009b3d93e6c38ed7",
       "e31d63172e4e9c42c8add500af9e8690ae911b90",
       "a22d4a299dd984dbd32a4f277c06f34df7ef5031",
-      "98bb7482cf5906bc1eafabed197ce9180d887c55"
+      "98bb7482cf5906bc1eafabed197ce9180d887c55",
+      "62e4c758c249442efffaa97592bd8a9770a780ec",
+      "209240dbaa963266a6f0ff548bb5e0ffd0ccc820",
+      "f2a3aa2211b24b76ef86c189d19828d07576e1f6",
+      "9fe9df5b0e1ab383a10e0075623cd5ba14f4544c",
+      "68ec5f328d2394c1583128ee07306c7f053336df",
+      "3873896ae741a6b1c892ea76a575c4f856992149",
+      "07ed242e9726710558ec6e4983242f91cc21cc5a",
+      "e05f64d91daff6fa89cd3e630a65dad791da84f2",
+      "d8412a5c254e327317b095389fba0eaaaa6664c5",
+      "adf83e7baf07726e9a3834dde26a2db25bacf0ef",
+      "9b27aecad20007c8eb0559359eb51ee576786dc5",
+      "d47452669e1a790e1725397df6825236e6610170",
+      "d8fabf87132af9250a91f297b1eb04e5999fce89",
+      "08911bd034c30613cc2a3b07c587138a7cf281ac",
+      "cf20d123b3b1aef8ba0ecfe83ee2b493e33f28e8",
+      "9346d69d3090e737f1000ebdd4fcb5ee2dada983",
+      "e67a46f6bda40603a0297dd6eafe390c5f211f98",
+      "9c01a365d585af764a75344ebca47d6184ec9403",
+      "d20de09095d89d10b96b8044ba2deb64e378dbf9",
+      "3f04665f12e89bd9e01c6cbb8f0ecb9724d14a15",
+      "9abd5581eeb8cdf9595c8807e8ec4ad4fd61495c",
+      "ee05249166733b2325d81c34e7ce77a397ab59c9",
+      "279137d4b89c4e60150341ab8eb8b5b9824a6750"
     ],
     "fcs_keys": {
       "beta": {
@@ -145,7 +168,13 @@
       "webkitgtk-2.52.2",
       "wpewebkit-2.52.2",
       "wpewebkit-2.52.3",
-      "webkitgtk-2.53.1"
+      "webkitgtk-2.53.1",
+      "wpewebkit-2.53.1",
+      "webkitgtk-2.53.2",
+      "wpewebkit-2.53.2",
+      "webkitgtk-2.53.3",
+      "wpewebkit-2.53.3",
+      "wpewebkit-2.52.4"
     ]
   },
   "apple-oss-distributions/distribution-macOS": {
@@ -167,7 +196,8 @@
       "macos-260",
       "macos-261",
       "macos-262",
-      "macos-263"
+      "macos-263",
+      "macos-264"
     ]
   },
   "fcs_keys": {
@@ -186,54 +216,34 @@
   "fcs_keys_beta": {
     "fcs_keys": {
       "beta": {
-        "fingerprint": "23F5054h_25F5053d_23O5453d",
-        "ios_build": "23F5054h",
-        "macos_build": "25F5053d",
-        "updated_at": "2026-04-16T19:32:19Z",
-        "visionos_build": "23O5453d"
-      },
-      "rc": {
-        "updated_at": "0001-01-01T00:00:00Z"
-      },
-      "release": {
-        "updated_at": "0001-01-01T00:00:00Z"
+        "fingerprint": "23G5043d_25G5043d_23O5743c",
+        "ios_build": "23G5043d",
+        "macos_build": "25G5043d",
+        "updated_at": "2026-06-17T19:46:08Z",
+        "visionos_build": "23O5743c"
       }
     }
   },
   "fcs_keys_rc": {
     "fcs_keys": {
       "rc": {
-        "fingerprint": "23E254_25E253_23O247",
-        "ios_build": "23E254",
-        "macos_build": "25E253",
-        "updated_at": "2026-04-19T19:19:27Z",
-        "visionos_build": "23O247"
+        "fingerprint": "23F75_25E243_23O244",
+        "ios_build": "23F75",
+        "macos_build": "25E243",
+        "updated_at": "2026-06-17T19:46:08Z",
+        "visionos_build": "23O244"
       }
     }
   },
   "fcs_keys_stable": {
     "fcs_keys": {
       "release": {
-        "fingerprint": "23E254_25E253_23O247",
-        "ios_build": "23E254",
-        "macos_build": "25E253",
-        "updated_at": "2026-04-19T19:19:27Z",
-        "visionos_build": "23O247"
+        "fingerprint": "23F77_25F80_23O471",
+        "ios_build": "23F77",
+        "macos_build": "25F80",
+        "updated_at": "2026-06-17T19:46:08Z",
+        "visionos_build": "23O471"
       }
     }
-  },
-  "latest_ipsw": {
-    "fcs_keys": {
-      "beta": {
-        "updated_at": "0001-01-01T00:00:00Z"
-      },
-      "rc": {
-        "updated_at": "0001-01-01T00:00:00Z"
-      },
-      "release": {
-        "updated_at": "0001-01-01T00:00:00Z"
-      }
-    },
-    "url": "https://updates.cdn-apple.com/2026SpringFCS/fullrestores/122-28459/AD0EA9E1-53B4-48C8-81A3-D19DD7D8139D/iPhone17,1_26.4.1_23E254_Restore.ipsw"
   }
 }

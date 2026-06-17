@@ -22,8 +22,6 @@ THE SOFTWARE.
 package download
 
 import (
-	"crypto/aes"
-	"encoding/hex"
 	"fmt"
 	"maps"
 	"os"
@@ -38,8 +36,8 @@ import (
 	"github.com/blacktop/ipsw/internal/download"
 	"github.com/blacktop/ipsw/internal/utils"
 	"github.com/blacktop/ipsw/pkg/dyld"
-	"github.com/blacktop/ipsw/pkg/img4"
 	"github.com/blacktop/ipsw/pkg/info"
+	"github.com/blacktop/ipsw/pkg/kernelcache"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -117,6 +115,81 @@ func init() {
 	viper.BindPFlag("download.ipsw.flat", downloadIpswCmd.Flags().Lookup("flat"))
 	viper.BindPFlag("download.ipsw.urls", downloadIpswCmd.Flags().Lookup("urls"))
 	viper.BindPFlag("download.ipsw.usb", downloadIpswCmd.Flags().Lookup("usb"))
+}
+
+func extractRemoteKernelcache(config *extract.Config, ipsw download.IPSW, urlDevices map[string][]string, proxy string, insecure bool, requireDecrypt bool) (map[string][]string, error) {
+	var lookupErr error
+
+	keys, keyErr := getFirmwareKeysForIPSW(ipsw, urlDevices, proxy, insecure)
+	if keyErr == nil {
+		configWithKeys := *config
+		configWithKeys.FirmwareKeys = keys
+		out, err := extract.Kernelcache(&configWithKeys)
+		if err == nil {
+			return out, nil
+		}
+		if requireDecrypt {
+			return nil, err
+		}
+		lookupErr = err
+		if errors.Is(err, extract.ErrNoDecryptionKey) {
+			log.Debugf("no matching kernelcache keys for %s %s: %v", ipsw.Identifier, ipsw.BuildID, err)
+		} else {
+			log.Debugf("auto kernelcache decryption failed for %s %s: %v", ipsw.Identifier, ipsw.BuildID, err)
+		}
+	} else if requireDecrypt {
+		return nil, keyErr
+	} else {
+		lookupErr = keyErr
+		log.Debugf("auto key lookup failed for %s %s: %v", ipsw.Identifier, ipsw.BuildID, keyErr)
+	}
+
+	out, err := extract.Kernelcache(config)
+	if err != nil && lookupErr != nil && errors.Is(err, kernelcache.ErrEncryptedKernelCache) {
+		return nil, fmt.Errorf("%w (auto key lookup failed: %v)", err, lookupErr)
+	}
+	return out, err
+}
+
+func getFirmwareKeysForIPSW(ipsw download.IPSW, urlDevices map[string][]string, proxy string, insecure bool) (download.WikiFWKeys, error) {
+	// Fetch keys for all device identifiers that share this URL
+	// (e.g., iBridge IPSWs bundle firmware for 16+ T2 variants).
+	devices := urlDevices[ipsw.URL]
+	if len(devices) == 0 {
+		devices = []string{ipsw.Identifier}
+	}
+
+	allKeys := make(download.WikiFWKeys)
+	for _, dev := range utils.Unique(devices) {
+		keys, err := download.GetWikiFirmwareKeys(&download.WikiConfig{
+			Keys:    true,
+			Device:  dev,
+			Version: ipsw.Version,
+			Build:   ipsw.BuildID,
+		}, proxy, insecure)
+		if err != nil {
+			log.Debugf("no keys for %s %s: %v", dev, ipsw.BuildID, err)
+			continue
+		}
+		maps.Copy(allKeys, keys)
+	}
+	if len(allKeys) == 0 {
+		return nil, fmt.Errorf("failed to get firmware keys for any device variant of %s %s", ipsw.BuildID, ipsw.Version)
+	}
+	return allKeys, nil
+}
+
+func decryptPartialFiles(out []string, keys download.WikiFWKeys, cwd string) error {
+	for _, in := range out {
+		decrypted, err := extract.DecryptPayloadWithKeys(in, in+".dec", keys)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt %s: %v", in, err)
+		}
+		if decrypted {
+			utils.Indent(log.Info, 2)("Decrypted " + strings.TrimPrefix(in, cwd) + ".dec")
+		}
+	}
+	return nil
 }
 
 // downloadIpswCmd represents the ipsw command
@@ -450,7 +523,7 @@ var downloadIpswCmd = &cobra.Command{
 		}
 
 		if cont {
-			if remoteKernel || remoteDSC || len(remotePattern) > 0 {
+			if remoteKernel || remoteDSC || len(remotePattern) > 0 || fcsKeys || fcsKeysJson {
 				for _, ipsw := range ipsws {
 					log.WithFields(log.Fields{
 						"device":  ipsw.Identifier,
@@ -474,119 +547,70 @@ var downloadIpswCmd = &cobra.Command{
 						Output:       output,
 					}
 
-					// REMOTE KERNEL MODE
-					if remoteKernel {
-						log.Info("Extracting remote kernelcache")
-						if out, err := extract.Kernelcache(config); err != nil {
-							return err
-						} else {
+					if err := func() error {
+						defer config.Close()
+
+						// REMOTE KERNEL MODE
+						if remoteKernel {
+							log.Info("Extracting remote kernelcache")
+							out, err := extractRemoteKernelcache(config, ipsw, urlDevices, proxy, insecure, decrypt)
+							if err != nil {
+								return err
+							}
 							for fn := range out {
 								utils.Indent(log.Info, 2)("Created " + fn)
 							}
 						}
-					}
-					// REMOTE DSC MODE
-					if remoteDSC {
-						log.Info("Extracting remote dyld_shared_cache(s)")
-						if out, err := extract.DSC(config); err != nil {
-							return err
-						} else {
+						// REMOTE DSC MODE
+						if remoteDSC {
+							log.Info("Extracting remote dyld_shared_cache(s)")
+							out, err := extract.DSC(config)
+							if err != nil {
+								return err
+							}
 							for _, f := range out {
 								utils.Indent(log.Info, 2)("Created " + f)
 							}
 						}
-					}
-					// REMOTE AEA1 DMG fcs-key MODE
-					if fcsKeys || fcsKeysJson {
-						if fcsKeysJson {
-							config.JSON = true
-						}
-						log.Info("Extracting remote AEA1 DMG fcs-keys")
-						if out, err := extract.FcsKeys(config); err != nil {
-							return err
-						} else {
+						// REMOTE AEA1 DMG fcs-key MODE
+						if fcsKeys || fcsKeysJson {
+							if fcsKeysJson {
+								config.JSON = true
+							}
+							log.Info("Extracting remote AEA1 DMG fcs-keys")
+							out, err := extract.FcsKeys(config)
+							if err != nil {
+								return err
+							}
 							for _, f := range out {
 								utils.Indent(log.Info, 2)("Created " + f)
 							}
 						}
-					}
-					// PATTERN MATCHING MODE
-					if len(remotePattern) > 0 {
-						log.Infof("Downloading files matching pattern %#v", remotePattern)
-						if out, err := extract.Search(config); err != nil {
-							return err
-						} else {
+						// PATTERN MATCHING MODE
+						if len(remotePattern) > 0 {
+							log.Infof("Downloading files matching pattern %#v", remotePattern)
+							out, err := extract.Search(config)
+							if err != nil {
+								return err
+							}
 							cwd, _ := os.Getwd()
 							for _, f := range out {
 								utils.Indent(log.Info, 2)("Created " + strings.TrimPrefix(f, cwd))
 							}
 							if decrypt {
 								log.Info("Searching for keys to decrypt files")
-								// Fetch keys for ALL device identifiers that share this URL
-								// (e.g., iBridge IPSWs bundle firmware for 16+ T2 variants).
-								devices := urlDevices[ipsw.URL]
-								if len(devices) == 0 {
-									devices = []string{ipsw.Identifier}
+								allKeys, err := getFirmwareKeysForIPSW(ipsw, urlDevices, proxy, insecure)
+								if err != nil {
+									return err
 								}
-								allKeys := make(download.WikiFWKeys)
-								for _, dev := range devices {
-									keys, err := download.GetWikiFirmwareKeys(&download.WikiConfig{
-										Keys:    true,
-										Device:  dev,
-										Version: ipsw.Version,
-										Build:   ipsw.BuildID,
-									}, proxy, insecure)
-									if err != nil {
-										log.Debugf("no keys for %s %s: %v", dev, ipsw.BuildID, err)
-										continue
-									}
-									maps.Copy(allKeys, keys)
-								}
-								if len(allKeys) == 0 {
-									return fmt.Errorf("failed to get firmware keys for any device variant of %s %s", ipsw.BuildID, ipsw.Version)
-								}
-								for _, key := range allKeys {
-									for idx, f := range key.Filename {
-										var in string
-										for _, o := range out {
-											if strings.HasSuffix(strings.ToLower(o), strings.ToLower(strings.ReplaceAll(f, " ", "_"))) {
-												in = o
-												break
-											}
-										}
-										if len(in) == 0 {
-											continue // not found
-										}
-										if len(key.Key) > 0 && len(key.Key[idx]) > 0 && key.Key[idx] != "Unknown" &&
-											len(key.Iv) > 0 && len(key.Iv[idx]) > 0 && key.Iv[idx] != "Unknown" {
-											iv, err := hex.DecodeString(key.Iv[idx])
-											if err != nil {
-												return fmt.Errorf("failed to decode iv: %v", err)
-											}
-											k, err := hex.DecodeString(key.Key[idx])
-											if err != nil {
-												return fmt.Errorf("failed to decode key: %v", err)
-											}
-											utils.Indent(log.Info, 2)("Decrypted " + strings.TrimPrefix(in, cwd) + ".dec")
-											if err := img4.DecryptPayload(in, in+".dec", iv, k); err != nil {
-												return fmt.Errorf("failed to decrypt %s: %v", in, err)
-											}
-										} else if len(key.Kbag) > 0 && len(key.Kbag[idx]) > 0 && key.Kbag[idx] != "Unknown" {
-											kbag, err := hex.DecodeString(key.Kbag[idx])
-											if err != nil {
-												return fmt.Errorf("failed to decode kbag: %v", err)
-											}
-											iv := kbag[:aes.BlockSize]
-											key := kbag[aes.BlockSize:]
-											utils.Indent(log.Info, 2)("Decrypted " + strings.TrimPrefix(in, cwd) + ".dec")
-											if err := img4.DecryptPayload(in, in+".dec", iv, key); err != nil {
-												return fmt.Errorf("failed to decrypt %s: %v", in, err)
-											}
-										}
-									}
+								if err := decryptPartialFiles(out, allKeys, cwd); err != nil {
+									return err
 								}
 							}
 						}
+						return nil
+					}(); err != nil {
+						return err
 					}
 				}
 			} else { // NORMAL MODE
