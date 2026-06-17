@@ -1,8 +1,5 @@
 {lib, ...}: {
-  perSystem = {
-    pkgs,
-    ...
-  }: let
+  perSystem = {pkgs, ...}: let
     inherit (pkgs) go_1_26 llvmPackages_latest buildGo126Module;
     inherit (llvmPackages_latest) clang bintools stdenv;
   in {

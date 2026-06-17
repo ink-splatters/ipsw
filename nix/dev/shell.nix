@@ -1,11 +1,12 @@
 {
   perSystem = {
     config,
+    lib,
     pkgs,
     ...
   }: let
     inherit (config) pre-commit commonArgs;
-    GOFLAGS = builtins.toString commonArgs.env.GOFLAGS;
+    GOFLAGS = "-tags=${lib.concatStringsSep "," commonArgs.tags}";
   in {
     # note that this dev shell doesn't include optimization flags on purpose
     devShells.default =

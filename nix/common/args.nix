@@ -1,6 +1,7 @@
 # common arguments, shared between dev and build
 {lib, ...}: let
-  inherit (lib) concatStringsSep mkOption optionals;
+  inherit (lib) mkOption optionals;
+  inherit (builtins) toString;
 in {
   perSystem = {
     config,
@@ -10,7 +11,7 @@ in {
     inherit (config) frida;
     inherit (pkgs) go_1_26;
 
-    CGO_CFLAGS = builtins.toString (optionals (frida.dev-kit != null) [
+    CGO_CFLAGS = toString (optionals (frida.dev-kit != null) [
         "-I${frida.dev-kit}/include"
       ]
       ++ [
@@ -18,22 +19,21 @@ in {
         "-pipe"
       ]);
 
-    CGO_LDFLAGS = builtins.toString (optionals (frida.dev-kit != null) [
+    CGO_LDFLAGS = toString (optionals (frida.dev-kit != null) [
       "-L${frida.dev-kit}/lib -lfrida-core"
     ]);
 
-    GOFLAGS = let
-      mkTags = tags: ["-tags=${concatStringsSep "," tags}"];
-    in
-      mkTags (
-        optionals (frida.dev-kit != null) [
-          "frida"
-        ]
-        ++ [
-          "unicorn"
-          "sectrust_compat"
-        ]
-      );
+    tags =
+      optionals (frida.dev-kit != null) [
+        "frida"
+      ]
+      ++ [
+        "libusb"
+        # "sandbox"       # enables new closed source functionality which we cannot build from public tree
+        "sectrust_compat" # https://github.com/ink-splatters/darwin-sectrust-compat
+        "unicorn"
+        "wallpaper"
+      ];
   in {
     options = {
       commonArgs = mkOption {
@@ -48,20 +48,22 @@ in {
             ++ optionals (frida.dev-kit != null) [frida.dev-kit];
 
           env.CGO_ENABLED = 1;
+          inherit tags;
 
-          nativeBuildInputs = with config.toolchain; [
-            clang
-            bintools
-            go_1_26
-          ];
+          nativeBuildInputs =
+            (with pkgs; [
+              go_1_26
+              pkg-config
+            ])
+            ++ (with config.toolchain; [
+              clang
+              bintools
+            ]);
 
           inherit
             CGO_CFLAGS
             CGO_LDFLAGS
             ;
-          env = {
-            inherit GOFLAGS;
-          };
         };
       };
     };

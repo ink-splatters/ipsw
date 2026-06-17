@@ -35,6 +35,7 @@
         inherit (config) src version vendorHash;
 
         subPackages = ["./cmd/ipsw"];
+        proxyVendor = true;
 
         enableParallelBuilding = true;
 
