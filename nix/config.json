@@ -2,14 +2,14 @@
   "version": "3.1.695+20260620",
   "vendorHash": "sha256-y0zBatLzCYJLl8PgF/eX9HWPJJoqX3xprArQWb7N7yw=",
   "frida": {
-    "version": "17.15.0",
+    "version": "17.15.3",
     "sources": {
       "aarch64-darwin": {
-        "url": "https://github.com/frida/frida/releases/download/17.15.0/frida-core-devkit-17.15.0-macos-arm64.tar.xz",
-        "hash": "sha256-6uUjZbIOASI3XZUGOwvTHwKT1ZLv66ZdmIui6TBDlN4="
+        "url": "https://github.com/frida/frida/releases/download/17.15.3/frida-core-devkit-17.15.3-macos-arm64.tar.xz",
+        "hash": "sha256-X65oBfz/yC92CHVIOg5ZAZwlAMgUQ/6MpBfi5uBLirg="
       },
       "x86_64-darwin": {
-        "url": "https://github.com/frida/frida/releases/download/17.15.0/frida-core-devkit-17.15.0-macos-x86_64.tar.xz",
+        "url": "https://github.com/frida/frida/releases/download/17.15.3/frida-core-devkit-17.15.3-macos-x86_64.tar.xz",
         "hash": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
       }
     }
