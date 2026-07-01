@@ -22,18 +22,26 @@ THE SOFTWARE.
 package cmd
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"fmt"
+	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/MakeNowJust/heredoc/v2"
 	"github.com/apex/log"
+	"github.com/blacktop/ipsw/internal/commands/dsc"
 	"github.com/blacktop/ipsw/internal/demangle"
+	"github.com/blacktop/ipsw/internal/magic"
+	"github.com/blacktop/ipsw/internal/tui"
 	"github.com/blacktop/ipsw/internal/utils"
 	"github.com/blacktop/ipsw/internal/xcode"
 	"github.com/blacktop/ipsw/pkg/crashlog"
@@ -41,6 +49,7 @@ import (
 	"github.com/blacktop/ipsw/pkg/info"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"golang.org/x/term"
 )
 
 func init() {
@@ -131,6 +140,16 @@ var symbolicateCmd = &cobra.Command{
 	# Pretty print a crashlog (BugType=309) these are usually symbolicated by the OS
 	❯ ipsw symbolicate --color Delta-2024-04-20-135807.ips
 
+	# Summarize a JetsamEvent low-memory report (BugType=298): killed process, cause, and top memory consumers
+	❯ ipsw symbolicate JetsamEvent-2026-06-14-150819.ips
+	  # Add --all to list every process, or --proc <name> to filter to one
+
+	# Summarize a Microstackshots resource report (BugType=145 SymptomsIO disk-writes, 202 CPU usage)
+	❯ ipsw symbolicate analyticsd.diskwrites_resource-2025-07-24-160552.ips
+	  # Shows the resource Event, the limit that was exceeded, and the heaviest stack
+	  # Pass an IPSW/DSC (or rely on matching Xcode DeviceSupport) to symbolicate the stack:
+	❯ ipsw symbolicate analyticsd.diskwrites_resource-2025-07-24-160552.ips iPhone17,1_26.0_23A5297m_Restore.ipsw
+
 	# Symbolicate an old style crashlog (BugType=109) requiring a dyld_shared_cache
 	❯ ipsw symbolicate Delta-2024-04-20-135807.ips dyld_shared_cache
 	  ⨯ please supply a dyld_shared_cache for iPhone13,3 running 14.5 (18E5154f)`),
@@ -179,6 +198,30 @@ var symbolicateCmd = &cobra.Command{
 			return fmt.Errorf("cannot use --unslide with --kc-slide or --dsc-slide (they are mutually exclusive)")
 		}
 
+		/* sysdiagnose archive or directory: browse every crash report inside */
+		if isSysdiagnoseInput(args[0]) {
+			var dscFile *dyld.File
+			if len(args) > 1 { // an IPSW/DSC was supplied: symbolicate stacks against it
+				f, cleanup, err := openDSCArg(filepath.Clean(args[1]), pemDB)
+				if err != nil {
+					return fmt.Errorf("failed to open %s: %v", filepath.Base(args[1]), err)
+				}
+				defer cleanup()
+				dscFile = f
+			}
+			return browseSysdiagnose(args[0], &crashlog.Config{
+				All:         all || Verbose,
+				Running:     running,
+				Process:     proc,
+				Unslid:      unslide,
+				KernelSlide: kcSlide,
+				DSCSlide:    dscSlide,
+				Demangle:    demangleFlag,
+				Hex:         asHex,
+				Verbose:     Verbose,
+			}, dscFile)
+		}
+
 		hdr, err := crashlog.ParseHeader(args[0])
 		if err != nil {
 			log.WithError(err).Error("failed to parse crashlog header")
@@ -189,7 +232,46 @@ var symbolicateCmd = &cobra.Command{
 		}
 
 		switch hdr.BugType {
-		case "210", "288", "309": // NEW JSON STYLE CRASHLOG
+		case "145", "202": // MICROSTACKSHOT RESOURCE REPORT (SymptomsIO disk-writes, CPU usage; text format)
+			ms, err := crashlog.OpenMicrostackshot(args[0], &crashlog.Config{
+				All:     all || Verbose,
+				Process: proc,
+				Verbose: Verbose,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to parse microstackshot report: %v", err)
+			}
+			if f, cleanup, err := openMicrostackshotDSC(args, ms, pemDB); err == nil {
+				defer cleanup()
+				ms.Symbolicate(f)
+			} else {
+				log.WithError(err).Warn("heaviest-stack symbolication unavailable; showing image+offset (supply an IPSW/DSC, or install matching Xcode DeviceSupport)")
+			}
+			fmt.Println(ms)
+		case "298", "409": // JETSAM EVENT / SYSTEM WATCHDOG CRASH (display only, nothing to symbolicate)
+			ips, err := crashlog.OpenIPS(args[0], &crashlog.Config{
+				All:     all || Verbose,
+				Running: running,
+				Process: proc,
+				Verbose: Verbose,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to parse %s report: %v", hdr.BugTypeDesc, err)
+			}
+			fmt.Println(ips)
+		case "183": // OTASUPDATE (software update/restore log; display only)
+			ota, err := crashlog.OpenOTAUpdate(args[0], &crashlog.Config{All: all || Verbose, Verbose: Verbose})
+			if err != nil {
+				return fmt.Errorf("failed to parse OTAUpdate report: %v", err)
+			}
+			fmt.Println(ota)
+		case "241": // AMT STREAMING STALL (CoreMedia HLS ABRTrace; deflate body, display only)
+			ss, err := crashlog.OpenStreamStall(args[0], &crashlog.Config{Verbose: Verbose})
+			if err != nil {
+				return fmt.Errorf("failed to parse AMTStreamingStall report: %v", err)
+			}
+			fmt.Println(ss)
+		case "210", "288", "308", "309": // NEW JSON STYLE CRASHLOG (308 = ExcUserFault)
 			ips, err := crashlog.OpenIPS(args[0], &crashlog.Config{
 				All:           all || Verbose,
 				Running:       running,
@@ -252,31 +334,39 @@ var symbolicateCmd = &cobra.Command{
 			} else {
 				// TODO: use IPSW to populate symbol server if both are supplied
 				if hdr.BugType == "210" || hdr.BugType == "288" {
-					/* validate IPSW */
-					i, err := info.Parse(args[1])
-					if err != nil {
-						return err
-					}
-					if i.Plists.BuildManifest.ProductVersion != ips.Header.Version() ||
-						i.Plists.BuildManifest.ProductBuildVersion != ips.Header.Build() ||
-						!slices.Contains(i.Plists.Restore.SupportedProductTypes, ips.Payload.Product) {
-						if !force {
-							return fmt.Errorf("supplied IPSW %s does NOT match crashlog: NEED %s; %s (%s), GOT %s; %s (%s) (use --force to override)",
+					// A bare kernelcache (Mach-O fileset) can be used directly for
+					// kernel-frame symbolication; only an IPSW needs validation.
+					if isMacho, _ := magic.IsMachO(filepath.Clean(args[1])); isMacho {
+						if err := ips.Symbolicate210(filepath.Clean(args[1]), nil, ""); err != nil {
+							return err
+						}
+					} else {
+						/* validate IPSW */
+						i, err := info.Parse(args[1])
+						if err != nil {
+							return err
+						}
+						if i.Plists.BuildManifest.ProductVersion != ips.Header.Version() ||
+							i.Plists.BuildManifest.ProductBuildVersion != ips.Header.Build() ||
+							!slices.Contains(i.Plists.Restore.SupportedProductTypes, ips.Payload.Product) {
+							if !force {
+								return fmt.Errorf("supplied IPSW %s does NOT match crashlog: NEED %s; %s (%s), GOT %s; %s (%s) (use --force to override)",
+									filepath.Base(args[1]),
+									ips.Payload.Product, ips.Header.Version(), ips.Header.Build(),
+									strings.Join(i.Plists.Restore.SupportedProductTypes, ", "),
+									i.Plists.BuildManifest.ProductVersion, i.Plists.BuildManifest.ProductBuildVersion,
+								)
+							}
+							log.Warnf("IPSW %s does not match crashlog (NEED %s; %s (%s), GOT %s; %s (%s)) - continuing anyway due to --force",
 								filepath.Base(args[1]),
 								ips.Payload.Product, ips.Header.Version(), ips.Header.Build(),
 								strings.Join(i.Plists.Restore.SupportedProductTypes, ", "),
 								i.Plists.BuildManifest.ProductVersion, i.Plists.BuildManifest.ProductBuildVersion,
 							)
 						}
-						log.Warnf("IPSW %s does not match crashlog (NEED %s; %s (%s), GOT %s; %s (%s)) - continuing anyway due to --force",
-							filepath.Base(args[1]),
-							ips.Payload.Product, ips.Header.Version(), ips.Header.Build(),
-							strings.Join(i.Plists.Restore.SupportedProductTypes, ", "),
-							i.Plists.BuildManifest.ProductVersion, i.Plists.BuildManifest.ProductBuildVersion,
-						)
-					}
-					if err := ips.Symbolicate210(filepath.Clean(args[1]), nil, ""); err != nil {
-						return err
+						if err := ips.Symbolicate210(filepath.Clean(args[1]), nil, ""); err != nil {
+							return err
+						}
 					}
 				}
 			}
@@ -335,6 +425,11 @@ var symbolicateCmd = &cobra.Command{
 				// 	return err
 				// }
 
+				// guard the triggering-thread index (parsed from the report) before
+				// indexing into Threads throughout this block
+				if crashLog.CrashedThread < 0 || crashLog.CrashedThread >= len(crashLog.Threads) {
+					return fmt.Errorf("crashlog triggering thread %d is out of range (have %d threads)", crashLog.CrashedThread, len(crashLog.Threads))
+				}
 				// Symbolicate the crashing thread's backtrace
 				for idx, bt := range crashLog.Threads[crashLog.CrashedThread].BackTrace {
 					image, err := f.Image(bt.Image.Name)
@@ -459,4 +554,298 @@ var symbolicateCmd = &cobra.Command{
 
 		return nil
 	},
+}
+
+// isSysdiagnoseInput reports whether path is a directory or a tar(.gz) archive
+// (a sysdiagnose) rather than a single .ips crash report.
+func isSysdiagnoseInput(path string) bool {
+	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+		return true
+	}
+	lower := strings.ToLower(path)
+	return strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".tar")
+}
+
+// browseSysdiagnose collects every .ips crash report in a sysdiagnose archive or
+// directory, renders each (symbolicating microstackshot stacks when dscFile is
+// supplied), and presents them in an interactive browser.
+func browseSysdiagnose(path string, conf *crashlog.Config, dscFile *dyld.File) error {
+	files, cleanup, err := collectCrashlogs(path)
+	if err != nil {
+		return fmt.Errorf("failed to read sysdiagnose %s: %v", filepath.Base(path), err)
+	}
+	defer cleanup()
+	if len(files) == 0 {
+		return fmt.Errorf("no .ips crash reports found in %s", filepath.Base(path))
+	}
+	log.Infof("found %d crash report(s) in %s", len(files), filepath.Base(path))
+
+	// Quiet per-report parser logs (e.g. the panic parser's missing-field
+	// warnings) so they don't scroll past before the browser opens.
+	if lgr, ok := log.Log.(*log.Logger); ok {
+		prev := lgr.Level
+		log.SetLevel(log.FatalLevel)
+		defer log.SetLevel(prev)
+	}
+
+	items := make([]tui.CrashlogItem, 0, len(files))
+	for _, fp := range files {
+		hdr, herr := crashlog.ParseHeader(fp)
+		name, when := filepath.Base(fp), ""
+		if herr == nil {
+			label := hdr.BugTypeDesc
+			if label == "" {
+				label = hdr.BugType
+			}
+			if hdr.Name != "" {
+				label += " — " + hdr.Name
+			}
+			name = label
+			when = hdr.Timestamp.Format("2006-01-02 15:04:05")
+		}
+		items = append(items, tui.CrashlogItem{
+			Name:    name,
+			Desc:    strings.TrimSpace(when + " • " + filepath.Base(fp)),
+			Content: renderCrashlog(fp, conf, dscFile),
+		})
+	}
+	sort.SliceStable(items, func(i, j int) bool { return items[i].Name < items[j].Name })
+
+	// Without an interactive terminal (piped, CI), print a plain index instead
+	// of launching the browser.
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		var b strings.Builder
+		for i, it := range items {
+			fmt.Fprintf(&b, "%3d. %s\n     %s\n", i+1, it.Name, it.Desc)
+		}
+		fmt.Print(b.String())
+		return nil
+	}
+
+	notice := ""
+	if dscFile == nil && hasMicrostackshot(files) {
+		notice = clNotice("No IPSW/DSC supplied",
+			"Resource-report stacks are shown as image+offset.",
+			"Pass an IPSW or dyld_shared_cache to symbolicate them:",
+			"",
+			"  ipsw symbolicate <sysdiagnose> <IPSW|DSC>",
+			"",
+			"press any key to continue")
+	}
+	return tui.RunCrashlogBrowser(items, notice)
+}
+
+// hasMicrostackshot reports whether any report is a microstackshot (145/202)
+// whose stack would benefit from DSC symbolication.
+func hasMicrostackshot(files []string) bool {
+	for _, fp := range files {
+		if hdr, err := crashlog.ParseHeader(fp); err == nil && (hdr.BugType == "145" || hdr.BugType == "202") {
+			return true
+		}
+	}
+	return false
+}
+
+// clNotice joins lines into the browser pop-up body.
+func clNotice(title string, lines ...string) string {
+	return strings.Join(append([]string{"💡  " + title, ""}, lines...), "\n")
+}
+
+// collectCrashlogs returns the paths of every .ips file in a directory or
+// tar(.gz) archive (extracted to a temp dir) plus a cleanup func.
+func collectCrashlogs(path string) ([]string, func(), error) {
+	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+		var ips []string
+		_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+			if err == nil && !d.IsDir() && strings.HasSuffix(p, ".ips") {
+				ips = append(ips, p)
+			}
+			return nil
+		})
+		return ips, func() {}, nil
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer f.Close()
+	var r io.Reader = f
+	if lower := strings.ToLower(path); strings.HasSuffix(lower, ".gz") || strings.HasSuffix(lower, ".tgz") {
+		gz, err := gzip.NewReader(f)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer gz.Close()
+		r = gz
+	}
+
+	tmp, err := os.MkdirTemp("", "ipsw-sysdiag-")
+	if err != nil {
+		return nil, nil, err
+	}
+	cleanup := func() { os.RemoveAll(tmp) }
+	var ips []string
+	tr := tar.NewReader(r)
+	for i := 0; ; i++ {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+		base := filepath.Base(hdr.Name)
+		if hdr.Typeflag != tar.TypeReg || !strings.HasSuffix(base, ".ips") || strings.HasPrefix(base, "._") {
+			continue // skip non-.ips and macOS AppleDouble (._*) companion files
+		}
+		// flatten with an index prefix so same-named reports in different dirs don't collide
+		out := filepath.Join(tmp, fmt.Sprintf("%03d_%s", i, filepath.Base(hdr.Name)))
+		of, err := os.Create(out)
+		if err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+		if _, err := io.Copy(of, tr); err != nil { //nolint:gosec // sysdiagnose .ips files are small text reports
+			of.Close()
+			cleanup()
+			return nil, nil, err
+		}
+		of.Close()
+		ips = append(ips, out)
+	}
+	return ips, cleanup, nil
+}
+
+// renderCrashlog parses and renders a single .ips report to display text for the
+// browser. When dscFile is supplied, microstackshot (145/202) stacks are
+// symbolicated against it (best effort — frames from a different build stay as
+// image+offset).
+func renderCrashlog(path string, conf *crashlog.Config, dscFile *dyld.File) string {
+	hdr, err := crashlog.ParseHeader(path)
+	if err != nil {
+		return fmt.Sprintf("failed to parse %s: %v", filepath.Base(path), err)
+	}
+	switch hdr.BugType {
+	case "145", "202":
+		ms, err := crashlog.OpenMicrostackshot(path, conf)
+		if err != nil {
+			return fmt.Sprintf("failed to parse %s: %v", filepath.Base(path), err)
+		}
+		if dscFile != nil {
+			ms.Symbolicate(dscFile)
+		}
+		return ms.String()
+	case "210", "288", "298", "308", "309", "409":
+		ips, err := crashlog.OpenIPS(path, conf)
+		if err != nil {
+			return fmt.Sprintf("failed to parse %s: %v", filepath.Base(path), err)
+		}
+		return ips.String()
+	case "109":
+		cl, err := crashlog.Open(path)
+		if err != nil {
+			return fmt.Sprintf("failed to parse %s: %v", filepath.Base(path), err)
+		}
+		defer cl.Close()
+		return cl.String()
+	case "183":
+		ota, err := crashlog.OpenOTAUpdate(path, conf)
+		if err != nil {
+			return fmt.Sprintf("failed to parse %s: %v", filepath.Base(path), err)
+		}
+		return ota.String()
+	case "241":
+		ss, err := crashlog.OpenStreamStall(path, conf)
+		if err != nil {
+			return fmt.Sprintf("failed to parse %s: %v", filepath.Base(path), err)
+		}
+		return ss.String()
+	default:
+		return fmt.Sprintf("%s - %s\n\n(crashlog type not yet supported for inline rendering)", hdr.BugType, hdr.BugTypeDesc)
+	}
+}
+
+// openDSCArg opens a supplied dyld_shared_cache file, or an IPSW (extracting its
+// DSC), into a *dyld.File with a cleanup func.
+func openDSCArg(path, pemDB string) (*dyld.File, func(), error) {
+	if f, err := dyld.Open(path); err == nil { // a dyld_shared_cache file
+		return f, func() { f.Close() }, nil
+	}
+	if _, err := info.Parse(path); err != nil { // not an IPSW either
+		return nil, nil, fmt.Errorf("could not open %s as a dyld_shared_cache or IPSW: %v", path, err)
+	}
+	ctx, fs, err := dsc.OpenFromIPSW(path, pemDB, false, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(fs) == 0 {
+		ctx.Unmount()
+		return nil, nil, fmt.Errorf("no dyld_shared_cache found in %s", path)
+	}
+	return fs[0], func() {
+		for _, f := range fs {
+			f.Close()
+		}
+		ctx.Unmount()
+	}, nil
+}
+
+// openMicrostackshotDSC resolves a dyld_shared_cache for symbolicating a
+// microstackshot's heaviest stack: a supplied DSC or IPSW (args[1]) takes
+// precedence, otherwise it falls back to the matching Xcode DeviceSupport dump.
+// Returns the cache, a cleanup func, and an error when no cache is available.
+func openMicrostackshotDSC(args []string, ms *crashlog.Microstackshot, pemDB string) (*dyld.File, func(), error) {
+	want := microstackshotCacheUUID(ms) // report's "Shared Cache:" UUID, if any
+
+	if len(args) > 1 {
+		f, cleanup, err := openDSCArg(filepath.Clean(args[1]), pemDB)
+		if err != nil {
+			return nil, nil, err
+		}
+		if want != "" && !strings.EqualFold(f.UUID.String(), want) {
+			log.Warnf("supplied cache %s does not match the report's shared cache %s; symbols may be wrong", f.UUID.String(), want)
+		}
+		return f, cleanup, nil
+	}
+
+	ds, err := xcode.FindDeviceSupport(ms.HardwareModel, ms.Header.Version(), ms.Header.Build())
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(ds.DSCs) == 0 {
+		return nil, nil, fmt.Errorf("Xcode DeviceSupport for %s has no dyld_shared_cache (loose-dylib symbolication is not supported here)", filepath.Base(ds.Dir))
+	}
+	// DeviceSupport may carry multiple architectures; prefer the cache whose UUID
+	// matches the report so image+offset doesn't resolve against the wrong cache.
+	if want != "" {
+		for _, p := range ds.DSCs {
+			f, err := dyld.Open(p)
+			if err != nil {
+				continue
+			}
+			if strings.EqualFold(f.UUID.String(), want) {
+				log.Infof("Using Xcode DeviceSupport DSC %s (matches report cache)", filepath.Base(p))
+				return f, func() { f.Close() }, nil
+			}
+			f.Close()
+		}
+		log.Warnf("no Xcode DeviceSupport cache matches the report's shared cache %s; using %s (symbols may be wrong)", want, filepath.Base(ds.DSCs[0]))
+	}
+	log.Infof("Using Xcode DeviceSupport DSC for %s", filepath.Base(ds.Dir))
+	f, err := dyld.Open(ds.DSCs[0])
+	if err != nil {
+		return nil, nil, err
+	}
+	return f, func() { f.Close() }, nil
+}
+
+// microstackshotCacheUUID extracts the cache UUID from the report's
+// "Shared Cache: <UUID> slid base address ..." line, uppercased.
+func microstackshotCacheUUID(ms *crashlog.Microstackshot) string {
+	if fields := strings.Fields(ms.SharedCache); len(fields) > 0 {
+		return strings.ToUpper(fields[0])
+	}
+	return ""
 }

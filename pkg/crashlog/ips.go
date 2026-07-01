@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/blacktop/ipsw/internal/commands/dsc"
 	"github.com/blacktop/ipsw/internal/commands/extract"
 	"github.com/blacktop/ipsw/internal/demangle"
+	"github.com/blacktop/ipsw/internal/magic"
 	"github.com/blacktop/ipsw/internal/search"
 	"github.com/blacktop/ipsw/internal/syms/server"
 	"github.com/blacktop/ipsw/pkg/disass"
@@ -41,6 +43,11 @@ import (
 //     - https://developer.apple.com/documentation/xcode/interpreting-the-json-format-of-a-crash-report
 //     - https://github.com/zed-industries/zed/blob/main/crates/collab/src/api/ips_file.rs
 
+// logTypeData is the crash-log type database (Apple bug_type -> name), gzipped
+// from OSAnalytics' submissionConfig.plist. Last refreshed from iOS/macOS 27
+// (24A5355q / 26A5353q). To update it from a newer IPSW, run
+// pkg/crashlog/data/update.sh (see that script's header for the one-liner).
+//
 //go:embed data/log_type.gz
 var logTypeData []byte
 
@@ -117,6 +124,7 @@ type Config struct {
 type Ips struct {
 	Header        IpsMetadata
 	Payload       IPSPayload
+	Jetsam        *Jetsam // populated for JetsamEvent (bug_type 298) reports
 	Config        *Config
 	KernelSymbols signature.SymbolMap // Symbols discovered while analyzing the kernelcache
 }
@@ -159,17 +167,29 @@ func (p Platform) String() string {
 
 type Timestamp time.Time
 
+// timestampLayouts are tried in order. Apple has shipped several shapes
+// (fractional seconds, ISO-8601) across report types; an unparseable timestamp
+// must never fail the surrounding document — it leaves a zero time.
+var timestampLayouts = []string{
+	"2006-01-02 15:04:05.00 -0700",
+	"2006-01-02 15:04:05 -0700",
+	time.RFC3339Nano,
+	time.RFC3339,
+	"2006-01-02 15:04:05",
+}
+
 func (ts *Timestamp) UnmarshalJSON(b []byte) error {
 	s := strings.Trim(string(b), "\"")
 	if s == "null" || s == "" {
 		return nil
 	}
-	// 2023-08-04 19:10:03.00 +0200
-	t, err := time.Parse("2006-01-02 15:04:05 -0700", s)
-	if err != nil {
-		return err
+	for _, layout := range timestampLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			*ts = Timestamp(t)
+			return nil
+		}
 	}
-	*ts = Timestamp(t)
+	log.Debugf("crashlog: unrecognized timestamp %q; leaving zero time", s)
 	return nil
 }
 func (r Timestamp) MarshalJSON() ([]byte, error) {
@@ -360,6 +380,9 @@ func (bi *BinaryImage) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return err
 	}
+	if len(raw) < 3 { // a truncated/reshaped tuple must not panic on raw[1]/raw[2]
+		return fmt.Errorf("binaryImage: expected >=3 elements, got %d", len(raw))
+	}
 	if err := json.Unmarshal(raw[0], &bi.UUID); err != nil {
 		return err
 	}
@@ -385,7 +408,9 @@ func (bi *BinaryImage) UnmarshalJSON(b []byte) error {
 	case "A":
 		bi.Source = "Absolute"
 	default:
-		return fmt.Errorf("invalid binary image source: %v", bi.Source)
+		// An unknown source class (Apple adds one) must not fail the whole
+		// report; keep the raw letter and treat it as a generic image.
+		bi.Source = "Unknown(" + bi.Source + ")"
 	}
 	return nil
 }
@@ -513,6 +538,14 @@ func (s ThreadState) String() string {
 		out.WriteString(fmt.Sprintf("  esr: %s\n", s.ESR))
 		return out.String()
 	} else {
+		// xv guards against a short/absent register file (non-arm64 thread
+		// state, truncated report, future flavor) — never index s.X by a literal.
+		xv := func(i int) uint64 {
+			if i < len(s.X) {
+				return s.X[i].Value
+			}
+			return 0
+		}
 		return fmt.Sprintf(
 			"    x0: %s   x1: %s   x2: %s   x3: %s\n"+
 				"    x4: %s   x5: %s   x6: %s   x7: %s\n"+
@@ -524,14 +557,14 @@ func (s ThreadState) String() string {
 				"   x28: %s   fp: %s   lr: %s\n"+
 				"    sp: %s   pc: %s cpsr: %s\n"+
 				"   esr: %s %s\n",
-			fmtAddr(s.X[0].Value), fmtAddr(s.X[1].Value), fmtAddr(s.X[2].Value), fmtAddr(s.X[3].Value),
-			fmtAddr(s.X[4].Value), fmtAddr(s.X[5].Value), fmtAddr(s.X[6].Value), fmtAddr(s.X[7].Value),
-			fmtAddr(s.X[8].Value), fmtAddr(s.X[9].Value), fmtAddr(s.X[10].Value), fmtAddr(s.X[11].Value),
-			fmtAddr(s.X[12].Value), fmtAddr(s.X[13].Value), fmtAddr(s.X[14].Value), fmtAddr(s.X[15].Value),
-			fmtAddr(s.X[16].Value), fmtAddr(s.X[17].Value), fmtAddr(s.X[18].Value), fmtAddr(s.X[19].Value),
-			fmtAddr(s.X[20].Value), fmtAddr(s.X[21].Value), fmtAddr(s.X[22].Value), fmtAddr(s.X[23].Value),
-			fmtAddr(s.X[24].Value), fmtAddr(s.X[25].Value), fmtAddr(s.X[26].Value), fmtAddr(s.X[27].Value),
-			fmtAddr(s.X[28].Value), fmtAddr(s.FP.Value), fmtAddr(s.LR.Value),
+			fmtAddr(xv(0)), fmtAddr(xv(1)), fmtAddr(xv(2)), fmtAddr(xv(3)),
+			fmtAddr(xv(4)), fmtAddr(xv(5)), fmtAddr(xv(6)), fmtAddr(xv(7)),
+			fmtAddr(xv(8)), fmtAddr(xv(9)), fmtAddr(xv(10)), fmtAddr(xv(11)),
+			fmtAddr(xv(12)), fmtAddr(xv(13)), fmtAddr(xv(14)), fmtAddr(xv(15)),
+			fmtAddr(xv(16)), fmtAddr(xv(17)), fmtAddr(xv(18)), fmtAddr(xv(19)),
+			fmtAddr(xv(20)), fmtAddr(xv(21)), fmtAddr(xv(22)), fmtAddr(xv(23)),
+			fmtAddr(xv(24)), fmtAddr(xv(25)), fmtAddr(xv(26)), fmtAddr(xv(27)),
+			fmtAddr(xv(28)), fmtAddr(s.FP.Value), fmtAddr(s.LR.Value),
 			fmtAddr(s.SP.Value), fmtAddr(s.PC.Value), fmtAddrSmol(s.CPSR.Value),
 			fmtAddrSmol(s.ESR.Value), colorField(s.ESR.Description))
 	}
@@ -572,25 +605,48 @@ type PanicFrame struct {
 }
 
 func (pf *PanicFrame) UnmarshalJSON(b []byte) error {
-	var s [2]uint64
+	// Frames are [imageIndex, offset] today, but tolerate trailing elements
+	// Apple may append and offsets sent as quoted hex strings.
+	var s []json.RawMessage
 	if err := json.Unmarshal(b, &s); err != nil {
 		return err
 	}
+	if len(s) < 2 {
+		return fmt.Errorf("panicFrame: expected >=2 elements, got %d", len(s))
+	}
+	idx := jsonUint(s[0])
 	*pf = PanicFrame{
-		ImageIndex:  s[0],
-		ImageName:   fmt.Sprintf("image_%d", s[0]),
-		ImageOffset: s[1],
+		ImageIndex:  idx,
+		ImageName:   fmt.Sprintf("image_%d", idx),
+		ImageOffset: jsonUint(s[1]),
 	}
 	return nil
 }
 
+// jsonUint decodes a JSON number or a quoted (possibly 0x-prefixed) string into
+// a uint64, returning 0 on anything unparseable.
+func jsonUint(raw json.RawMessage) uint64 {
+	var n uint64
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n
+	}
+	var str string
+	if err := json.Unmarshal(raw, &str); err == nil {
+		if v, err := strconv.ParseUint(strings.TrimSpace(str), 0, 64); err == nil {
+			return v
+		}
+	}
+	return 0
+}
+
 type Termination struct {
-	ByPid     int    `json:"byPid,omitempty"`
-	ByProc    string `json:"byProc,omitempty"`
-	Code      int    `json:"code,omitempty"`
-	Flags     int    `json:"flags,omitempty"` // https://opensource.apple.com/source/xnu/xnu-3789.21.4/bsd/sys/reason.h.auto.html
-	Indicator string `json:"indicator,omitempty"`
-	Namespace string `json:"namespace,omitempty"`
+	ByPid     int      `json:"byPid,omitempty"`
+	ByProc    string   `json:"byProc,omitempty"`
+	Code      int      `json:"code,omitempty"`
+	Flags     int      `json:"flags,omitempty"` // https://opensource.apple.com/source/xnu/xnu-3789.21.4/bsd/sys/reason.h.auto.html
+	Indicator string   `json:"indicator,omitempty"`
+	Namespace string   `json:"namespace,omitempty"`
+	Details   []string `json:"details,omitempty"` // WATCHDOG reports explain the timeout here
 }
 
 type PostSampleVMStats struct {
@@ -742,6 +798,18 @@ type IPSPayload struct {
 	PostSampleVMStats PostSampleVMStats `json:"postSampleVMStats"`
 	AdditionalDetails AdditionalDetails `json:"additionalDetails"`
 
+	// SystemWatchdogCrash (409) fields. Its processByPid/binaryImages live under
+	// a nested "stackshot" object (not at the payload top level); OpenIPS promotes
+	// them so the panic-style process renderer works.
+	ReportNotes          []string `json:"reportNotes,omitempty"`
+	DisplayState         string   `json:"displayState,omitempty"`
+	ThermalPressureLevel string   `json:"thermalPressureLevel,omitempty"`
+	TrmStatus            int      `json:"trmStatus,omitempty"`
+	Stackshot            struct {
+		ProcessByPid map[int]Process `json:"processByPid,omitempty"`
+		BinaryImages []BinaryImage   `json:"binaryImages,omitempty"`
+	} `json:"stackshot"`
+
 	panic210 *Panic210
 }
 
@@ -787,12 +855,24 @@ func OpenIPS(in string, conf *Config) (*Ips, error) {
 	if err := dec.Decode(&ips.Header); err != nil {
 		return nil, err
 	}
-	if err := dec.Decode(&ips.Payload); err != nil {
-		return nil, err
-	}
 
-	if len(ips.Payload.Product) == 0 {
-		ips.Payload.Product = ips.Payload.ModelCode
+	if ips.Header.BugType == "298" { // JetsamEvent has a distinct payload shape
+		if err := dec.Decode(&ips.Jetsam); err != nil {
+			return nil, fmt.Errorf("failed to decode JetsamEvent payload: %w", err)
+		}
+	} else {
+		if err := dec.Decode(&ips.Payload); err != nil {
+			return nil, err
+		}
+		if len(ips.Payload.Product) == 0 {
+			ips.Payload.Product = ips.Payload.ModelCode
+		}
+		// SystemWatchdogCrash (409) nests its process/image tables under
+		// "stackshot"; promote them so the shared process renderer can use them.
+		if len(ips.Payload.ProcessByPid) == 0 && len(ips.Payload.Stackshot.ProcessByPid) > 0 {
+			ips.Payload.ProcessByPid = ips.Payload.Stackshot.ProcessByPid
+			ips.Payload.BinaryImages = ips.Payload.Stackshot.BinaryImages
+		}
 	}
 
 	db, err := GetLogTypes()
@@ -1109,21 +1189,60 @@ func (i *Ips) crashFrameAddr(f Frame) (addr uint64, name, slideInfo string) {
 		return f.ImageOffset, fmt.Sprintf("image_%d", f.ImageIndex), ""
 	}
 	img := i.Payload.UsedImages[f.ImageIndex]
-	name = img.Name
 	addr = img.Base + f.ImageOffset
 
+	// Some reports (e.g. 308 ExcUserFault) ship compact usedImages with only
+	// base/source/uuid; fall back to a meaningful name instead of a blank cell.
+	name = img.Name
+	if name == "" {
+		switch {
+		case img.Path != "":
+			name = filepath.Base(img.Path)
+		case img.Source == "S" || img.Source == "C":
+			name = "dyld_shared_cache"
+		case img.Source == "P" && i.Payload.ProcName != "":
+			name = i.Payload.ProcName
+		case len(img.UUID) >= 8:
+			name = "<" + img.UUID[:8] + ">"
+		default:
+			name = fmt.Sprintf("image_%d", f.ImageIndex)
+		}
+	}
+
+	// A frame is in the shared cache if it sits inside the report's sharedCache
+	// range, or its image is sourced from the cache (308 carries no sharedCache
+	// block, so range-checking alone misses its source "S"/"C" frames).
 	sc := i.Payload.SharedCache
-	isDSC := sc.Size > 0 && img.Base >= sc.Base && img.Base < sc.Base+sc.Size
+	isDSC := (sc.Size > 0 && img.Base >= sc.Base && img.Base < sc.Base+sc.Size) || img.Source == "S" || img.Source == "C"
+	// The cache base for rebasing must come from the cache itself (sharedCache
+	// block or the source-"S" image), NOT a per-library source-"C" image base —
+	// using img.Base for a "C" frame drops the library's offset within the cache.
+	cacheBase, haveCacheBase := i.sharedCacheBase()
 
 	switch {
-	case isDSC && i.Config.DSCSlide != 0:
-		addr = i.Config.DSCSlide + (addr - sc.Base)
+	case isDSC && haveCacheBase && i.Config.DSCSlide != 0:
+		addr = i.Config.DSCSlide + (addr - cacheBase)
 		slideInfo = fmt.Sprintf(" (dsc-slide %#x)", i.Config.DSCSlide)
 	case i.Config.Unslid && f.Slide != 0 && addr >= f.Slide:
 		addr -= f.Slide
 		slideInfo = fmt.Sprintf(" (unslid %#x)", f.Slide)
 	}
 	return addr, name, slideInfo
+}
+
+// sharedCacheBase returns the shared-cache base address for --dsc-slide
+// rebasing, from the report's sharedCache block or, failing that, a source-"S"
+// usedImage (the whole-cache image). Returns false when neither is present.
+func (i *Ips) sharedCacheBase() (uint64, bool) {
+	if i.Payload.SharedCache.Size > 0 {
+		return i.Payload.SharedCache.Base, true
+	}
+	for idx := range i.Payload.UsedImages {
+		if i.Payload.UsedImages[idx].Source == "S" {
+			return i.Payload.UsedImages[idx].Base, true
+		}
+	}
+	return 0, false
 }
 
 // fmtSymbolLocation renders a frame's symbol offset as " + N" (or " + 0xN" with
@@ -1242,70 +1361,89 @@ func (i *Ips) Symbolicate210(ipswPath string, dscPaths []string, looseDir string
 	machoFuncMap := make(map[string][]types.Function)
 	uuidFuncMap := make(map[string][]types.Function)
 
+	// A bare kernelcache (Mach-O fileset) can be supplied instead of an IPSW;
+	// detect it once so the IPSW-only filesystem/DSC paths are skipped below.
+	bareKC := false
+	if ipswPath != "" {
+		bareKC, _ = magic.IsMachO(ipswPath)
+	}
+
 	/* SYMBOLICATE KERNELCACHE */
 	var kc *macho.File
 	if ipswPath != "" {
-		// If crashlog has no device identifier, prompt user to select from available devices
-		device := i.Payload.Product
-		log.WithField("device", device).Debug("Looking for kernelcache matching crashlog device")
-		if device == "" {
-			ipswInfo, err := info.Parse(ipswPath)
-			if err != nil {
-				return fmt.Errorf("crashlog has no device identifier and failed to parse IPSW info: %w", err)
-			}
-			var devices []string
-			for _, dtree := range ipswInfo.DeviceTrees {
-				if dt, err := dtree.Summary(); err == nil {
-					devices = append(devices, dt.ProductType)
+		var kcPaths []string
+		if bareKC {
+			// A bare kernelcache (Mach-O fileset) was supplied directly: use it
+			// as-is for kernel-frame symbolication; never extract from an IPSW or
+			// delete the user's file.
+			log.WithField("kernelcache", filepath.Base(ipswPath)).Info("Using supplied kernelcache")
+			kcPaths = []string{ipswPath}
+		} else {
+			// If crashlog has no device identifier, prompt user to select from available devices
+			device := i.Payload.Product
+			log.WithField("device", device).Debug("Looking for kernelcache matching crashlog device")
+			if device == "" {
+				ipswInfo, err := info.Parse(ipswPath)
+				if err != nil {
+					return fmt.Errorf("crashlog has no device identifier and failed to parse IPSW info: %w", err)
 				}
-			}
-			if len(devices) == 0 {
-				return fmt.Errorf("crashlog has no device identifier and no devices found in IPSW")
-			}
-			sort.Strings(devices)
-			if len(devices) == 1 {
-				device = devices[0]
-				log.Warnf("crashlog has no device identifier; using only available device: %s", device)
-			} else {
-				var choice string
-				prompt := &survey.Select{
-					Message:  "Crashlog has no device identifier. Select target device:",
-					Options:  devices,
-					PageSize: 15,
-				}
-				if err := survey.AskOne(prompt, &choice); err != nil {
-					if err == terminal.InterruptErr {
-						return fmt.Errorf("user cancelled device selection")
+				var devices []string
+				for _, dtree := range ipswInfo.DeviceTrees {
+					if dt, err := dtree.Summary(); err == nil {
+						devices = append(devices, dt.ProductType)
 					}
-					return fmt.Errorf("failed to select device: %w", err)
 				}
-				device = choice
+				if len(devices) == 0 {
+					return fmt.Errorf("crashlog has no device identifier and no devices found in IPSW")
+				}
+				sort.Strings(devices)
+				if len(devices) == 1 {
+					device = devices[0]
+					log.Warnf("crashlog has no device identifier; using only available device: %s", device)
+				} else {
+					var choice string
+					prompt := &survey.Select{
+						Message:  "Crashlog has no device identifier. Select target device:",
+						Options:  devices,
+						PageSize: 15,
+					}
+					if err := survey.AskOne(prompt, &choice); err != nil {
+						if err == terminal.InterruptErr {
+							return fmt.Errorf("user cancelled device selection")
+						}
+						return fmt.Errorf("failed to select device: %w", err)
+					}
+					device = choice
+				}
 			}
-		}
 
-		out, err := extract.Kernelcache(&extract.Config{
-			IPSW:         ipswPath,
-			KernelDevice: device,
-			Output:       os.TempDir(),
-		})
-		if err != nil {
-			return fmt.Errorf("failed to extract kernelcache: %w", err)
-		}
-		if len(out) == 0 {
-			return fmt.Errorf("no kernelcache found for device %s in IPSW (multi-device IPSW may not contain this device)", device)
-		}
-		// Log which kernelcache(s) were found for the device
-		for k := range out {
-			log.WithFields(log.Fields{
-				"device":      device,
-				"kernelcache": filepath.Base(k),
-			}).Debug("Found kernelcache for device")
-		}
-		defer func() {
-			for k := range out {
-				os.Remove(k)
+			out, err := extract.Kernelcache(&extract.Config{
+				IPSW:         ipswPath,
+				KernelDevice: device,
+				Output:       os.TempDir(),
+			})
+			if err != nil {
+				return fmt.Errorf("failed to extract kernelcache: %w", err)
 			}
-		}()
+			if len(out) == 0 {
+				return fmt.Errorf("no kernelcache found for device %s in IPSW (multi-device IPSW may not contain this device)", device)
+			}
+			// Log which kernelcache(s) were found for the device
+			for k := range out {
+				log.WithFields(log.Fields{
+					"device":      device,
+					"kernelcache": filepath.Base(k),
+				}).Debug("Found kernelcache for device")
+			}
+			defer func() {
+				for k := range out {
+					os.Remove(k)
+				}
+			}()
+			for k := range out {
+				kcPaths = append(kcPaths, k)
+			}
+		}
 
 		// Collect all kernel-related UUIDs from crashlog for validation
 		// kc.UUID() returns the LC_UUID of the kernelcache container
@@ -1349,7 +1487,7 @@ func (i *Ips) Symbolicate210(ipswPath string, dscPaths []string, looseDir string
 			}
 		}
 
-		for k := range out {
+		for _, k := range kcPaths {
 			smap := signature.NewSymbolMap()
 			log.WithField("kernelcache", filepath.Base(k)).Info("Symbolicating...")
 			if err := smap.Symbolicate(k, sigs, !i.Config.Verbose); err != nil {
@@ -1502,7 +1640,7 @@ func (i *Ips) Symbolicate210(ipswPath string, dscPaths []string, looseDir string
 	}
 
 	/* SYMBOLICATE FILESYSTEM MACHOS */
-	if ipswPath != "" {
+	if ipswPath != "" && !bareKC {
 		if err := search.ForEachMachoInIPSW(ipswPath, i.Config.PemDB, func(path string, m *macho.File) error {
 			if total == 0 {
 				return ErrDone // break
@@ -1583,7 +1721,11 @@ func (i *Ips) Symbolicate210(ipswPath string, dscPaths []string, looseDir string
 	// 	}
 	// }
 
-	fs, closeDSCs, err := i.openDSCs(ipswPath, dscPaths)
+	dscIPSW := ipswPath
+	if bareKC {
+		dscIPSW = "" // a bare kernelcache has no DSC; userspace frames stay raw
+	}
+	fs, closeDSCs, err := i.openDSCs(dscIPSW, dscPaths)
 	if err != nil {
 		return err
 	}
@@ -1605,6 +1747,9 @@ func (i *Ips) Symbolicate210(ipswPath string, dscPaths []string, looseDir string
 	for pid, proc := range i.Payload.ProcessByPid {
 		for tid, thread := range proc.ThreadByID {
 			for idx, frame := range thread.UserFrames {
+				if int(frame.ImageIndex) >= len(i.Payload.BinaryImages) {
+					continue // frame references an image outside the table (corrupt/truncated)
+				}
 				i.Payload.ProcessByPid[pid].ThreadByID[tid].UserFrames[idx].ImageOffset += i.Payload.BinaryImages[frame.ImageIndex].Base
 				if i.Payload.BinaryImages[frame.ImageIndex].Slide != 0 {
 					i.Payload.ProcessByPid[pid].ThreadByID[tid].UserFrames[idx].Slide = i.Payload.BinaryImages[frame.ImageIndex].Slide
@@ -1705,6 +1850,9 @@ func (i *Ips) Symbolicate210(ipswPath string, dscPaths []string, looseDir string
 			/* KernelFrames */
 			if kc != nil {
 				for idx, frame := range thread.KernelFrames {
+					if int(frame.ImageIndex) >= len(i.Payload.BinaryImages) {
+						continue // frame references an image outside the table (corrupt/truncated)
+					}
 					i.Payload.ProcessByPid[pid].ThreadByID[tid].KernelFrames[idx].ImageOffset += i.Payload.BinaryImages[frame.ImageIndex].Base
 					if i.Payload.BinaryImages[frame.ImageIndex].Slide != 0 {
 						i.Payload.ProcessByPid[pid].ThreadByID[tid].KernelFrames[idx].Slide = i.Payload.BinaryImages[frame.ImageIndex].Slide
@@ -1985,6 +2133,9 @@ func (i *Ips) Symbolicate210WithDatabase(dbURL string) (err error) {
 	for pid, proc := range i.Payload.ProcessByPid {
 		for tid, thread := range proc.ThreadByID {
 			for idx, frame := range thread.UserFrames {
+				if int(frame.ImageIndex) >= len(i.Payload.BinaryImages) {
+					continue // frame references an image outside the table (corrupt/truncated)
+				}
 				i.Payload.ProcessByPid[pid].ThreadByID[tid].UserFrames[idx].ImageOffset += i.Payload.BinaryImages[frame.ImageIndex].Base
 				if i.Payload.BinaryImages[frame.ImageIndex].Slide != 0 {
 					i.Payload.ProcessByPid[pid].ThreadByID[tid].UserFrames[idx].Slide = i.Payload.BinaryImages[frame.ImageIndex].Slide
@@ -2135,53 +2286,120 @@ func colorVMSummary(in string) string {
 }
 
 func (i *Ips) String() string {
-	var out string
+	if render, ok := ipsRenderers[i.Header.BugType]; ok {
+		return render(i)
+	}
+	return fmt.Sprintf("%s: (unsupported, notify author)", i.Header.BugType)
+}
 
-	switch i.Header.BugType {
-	case "Panic", "210", "288":
-		out = fmt.Sprintf("[%s] - %s - %s %s\n\n", colorTime(i.Header.Timestamp.Format("02Jan2006 15:04:05")), colorError(i.Header.BugTypeDesc), i.Payload.Product, i.Payload.Build)
-		if i.Payload.panic210 == nil {
-			var err error
-			i.Payload.panic210, err = parsePanicString210(i.Payload.PanicString)
-			if err != nil {
-				log.Errorf("failed to parse panic string: %w", err)
-			}
+// headerLine renders the "[time] - BugType - Product Build" banner shared by the
+// panic (210/288) and watchdog (409) renderers. Watchdog stackshot payloads carry
+// the OS string in osVersion/os_version rather than a top-level build, so fall
+// back to the header's os_version when Payload.Build is empty.
+func (i *Ips) headerLine() string {
+	osVer := i.Payload.Build
+	if osVer == "" {
+		osVer = i.Header.OsVersion
+	}
+	return fmt.Sprintf("[%s] - %s - %s %s\n\n", colorTime(i.Header.Timestamp.Format("02Jan2006 15:04:05")), colorError(i.Header.BugTypeDesc), i.Payload.Product, osVer)
+}
+
+// panicString renders kernel panic / stackshot reports (bug_type 210 / 288).
+func (i *Ips) panicString() string {
+	var out strings.Builder
+	out.WriteString(i.headerLine())
+	if i.Payload.panic210 == nil {
+		var err error
+		i.Payload.panic210, err = parsePanicString210(i.Payload.PanicString)
+		if err != nil {
+			log.Errorf("failed to parse panic string: %w", err)
 		}
-		if i.Config.Verbose {
-			if len(i.Payload.PanicString) > 0 {
-				out += fmt.Sprintf("%s: %s\n", colorField("Panic String"), i.Payload.PanicString)
-			}
+	}
+	if i.Payload.panic210 == nil { // never deref a nil panic210 below (empty/garbage panic string)
+		i.Payload.panic210 = &Panic210{}
+	}
+	if i.Config.Verbose {
+		if len(i.Payload.PanicString) > 0 {
+			out.WriteString(fmt.Sprintf("%s: %s\n", colorField("Panic String"), i.Payload.PanicString))
+		}
+	} else {
+		out.WriteString(i.Payload.panic210.String())
+	}
+	if len(i.Payload.PanicFlags) > 0 {
+		out.WriteString(fmt.Sprintf("%s: %s\n", colorField("Panic Flags"), i.Payload.PanicFlags))
+	}
+	out.WriteString("\n" + i.Payload.MemoryStatus.String())
+	out.WriteString(i.Payload.OtherString + "\n")
+	out.WriteString(i.processDumpString(i.Payload.panic210.PanickedTask.PID, i.Payload.panic210.PanickedThread.TID))
+	if len(i.Payload.Notes) > 0 {
+		out.WriteString(colorField("NOTES") + ":\n")
+		for _, n := range i.Payload.Notes {
+			out.WriteString(fmt.Sprintf("    - %s\n", n))
+		}
+	}
+	return out.String()
+}
+
+// processDumpString renders the stackshot process/thread table shared by kernel
+// panics (210/288) and SystemWatchdogCrash (409). panickedPID/panickedTID mark
+// the offending process/thread (pass -1 to mark none). With Config.All unset the
+// dump is filtered to the marked process plus any matching Running/Process
+// selection, so callers always surface the process of interest.
+func (i *Ips) processDumpString(panickedPID, panickedTID int) string {
+	var out strings.Builder
+	var pids []int
+	for pid := range i.Payload.ProcessByPid {
+		pids = append(pids, pid)
+	}
+	sort.Ints(pids)
+	for _, pid := range pids {
+		p := i.Payload.ProcessByPid[pid]
+		paniced := ""
+		if p.ID == panickedPID {
+			paniced = colorError(" (Panicked)")
 		} else {
-			out += i.Payload.panic210.String()
+			/* filter procs */
+			if !i.Config.All {
+				if i.Config.Running {
+					notRunning := true
+					// check if any thread is running
+					for _, t := range p.ThreadByID {
+						if slices.Contains(t.State, "TH_RUN") {
+							notRunning = false
+							break
+						}
+					}
+					if notRunning {
+						continue
+					}
+				} else if len(i.Config.Process) > 0 {
+					if p.Name != i.Config.Process {
+						continue
+					}
+				} else {
+					continue
+				}
+			}
 		}
-		if len(i.Payload.PanicFlags) > 0 {
-			out += fmt.Sprintf("%s: %s\n", colorField("Panic Flags"), i.Payload.PanicFlags)
+		out.WriteString(fmt.Sprintf(colorField("Process")+": %s [%s]%s\n", colorImage(p.Name), colorBold("%d", p.ID), paniced))
+		// When the marked process has no single flagged thread (panickedTID < 0,
+		// e.g. a watchdog timeout), show all of its threads — it is the subject.
+		showAllThreads := p.ID == panickedPID && panickedTID < 0
+		tids := make([]int, 0, len(p.ThreadByID))
+		for tid := range p.ThreadByID {
+			tids = append(tids, tid)
 		}
-		out += "\n" + i.Payload.MemoryStatus.String()
-		out += i.Payload.OtherString + "\n"
-		var pids []int
-		for pid := range i.Payload.ProcessByPid {
-			pids = append(pids, pid)
-		}
-		sort.Ints(pids)
-		for _, pid := range pids {
-			p := i.Payload.ProcessByPid[pid]
-			paniced := ""
-			if p.ID == i.Payload.panic210.PanickedTask.PID {
-				paniced = colorError(" (Panicked)")
-			} else {
-				/* filter procs */
+		sort.Ints(tids)
+		for _, tid := range tids {
+			t := p.ThreadByID[tid]
+			paniced = ""
+			if t.ID == panickedTID {
+				paniced = colorError("       (Panicked)")
+			} else if !showAllThreads {
+				/* filter threads */
 				if !i.Config.All {
 					if i.Config.Running {
-						notRunning := true
-						// check if any thread is running
-						for _, t := range p.ThreadByID {
-							if slices.Contains(t.State, "TH_RUN") {
-								notRunning = false
-								break
-							}
-						}
-						if notRunning {
+						if !slices.Contains(t.State, "TH_RUN") {
 							continue
 						}
 					} else if len(i.Config.Process) > 0 {
@@ -2193,260 +2411,314 @@ func (i *Ips) String() string {
 					}
 				}
 			}
-			out += fmt.Sprintf(colorField("Process")+": %s [%s]%s\n", colorImage(p.Name), colorBold("%d", p.ID), paniced)
-			for _, t := range p.ThreadByID {
-				paniced = ""
-				if t.ID == i.Payload.panic210.PanickedThread.TID {
-					paniced = colorError("       (Panicked)")
-				} else {
-					/* filter threads */
-					if !i.Config.All {
-						if i.Config.Running {
-							if !slices.Contains(t.State, "TH_RUN") {
-								continue
-							}
-						} else if len(i.Config.Process) > 0 {
-							if p.Name != i.Config.Process {
-								continue
-							}
-						} else {
-							continue
-						}
-					}
-				}
-				out += fmt.Sprintf(colorField("  Thread")+": %s%s\n", colorBold("%d", t.ID), paniced)
-				if len(t.Name) > 0 {
-					out += fmt.Sprintf("    Name:           %s\n", colorTime(t.Name))
-				}
-				if len(t.DispatchQueueLabel) > 0 {
-					out += fmt.Sprintf("    Queue:          %s\n", t.DispatchQueueLabel)
-				}
-				out += fmt.Sprintf("    State:          %s\n", fmtState(t.State))
-				out += fmt.Sprintf("    Base Priority:  %d\n", t.BasePriority)
-				out += fmt.Sprintf("    Sched Priority: %d\n", t.SchedPriority)
-				out += fmt.Sprintf("    User Time:      %d usec\n", t.UserUsec)
-				out += fmt.Sprintf("    System Time:    %d usec\n", t.SystemUsec)
-				if len(t.UserFrames) > 0 {
-					out += "    User Frames:\n"
-					isPanickedThread := i.Payload.panic210 != nil &&
-						p.ID == i.Payload.panic210.PanickedTask.PID &&
-						t.ID == i.Payload.panic210.PanickedThread.TID
-					buf := bytes.NewBufferString("")
-					w := tabwriter.NewWriter(buf, 0, 0, 1, ' ', 0)
-					for idx, f := range t.UserFrames {
-						if f.ImageName == "absolute" {
-							continue
-						}
-						addr, slideVal, _ := i.panicFrameAddr(f)
-						slideInfo := ""
-						if slideVal > 0 {
-							slideInfo = fmt.Sprintf(" (slide=%#x)", slideVal)
-						}
-						symloc := i.fmtSymbolLocation(f.SymbolLocation)
-						fmt.Fprintf(w, "      %02d: %s\t%s%s %s%s\n", idx, colorImage(f.ImageName), colorAddr("%#x", addr), slideInfo, colorField(f.Symbol), symloc)
-						// Add peek disassembly for panicked thread frames
-						if i.Config.Peek && isPanickedThread && len(f.PeekBytes) > 0 {
-							w.Flush()
-							out += buf.String()
-							buf.Reset()
-							isDSC := i.isDSCFrame(f)
-							out += formatPeekDisassembly(f.PeekBytes, f.PeekAddr, f.PeekFrameIdx, slideVal, i.Config.KernelSlide, i.Config.DSCSlide, isDSC, i.Config.Unslid, f.PeekSymbols, i.Config.Demangle)
-						}
-					}
-					w.Flush()
-					out += buf.String()
-				}
-				if len(t.KernelFrames) > 0 {
-					out += "    Kernel Frames:\n"
-					isPanickedThread := i.Payload.panic210 != nil &&
-						p.ID == i.Payload.panic210.PanickedTask.PID &&
-						t.ID == i.Payload.panic210.PanickedThread.TID
-					buf := bytes.NewBufferString("")
-					w := tabwriter.NewWriter(buf, 0, 0, 1, ' ', 0)
-					for idx, f := range t.KernelFrames {
-						if f.ImageName == "absolute" {
-							continue
-						}
-						addr, slideVal, _ := i.panicFrameAddr(f)
-						slideInfo := ""
-						if slideVal > 0 {
-							slideInfo = fmt.Sprintf(" (slide=%#x)", slideVal)
-						}
-						symloc := i.fmtSymbolLocation(f.SymbolLocation)
-						fmt.Fprintf(w, "      %02d: %s\t%s%s %s%s\n", idx, colorImage(f.ImageName), colorAddr("%#x", addr), slideInfo, colorField(f.Symbol), symloc)
-						// Add peek disassembly for panicked thread frames
-						if i.Config.Peek && isPanickedThread && len(f.PeekBytes) > 0 {
-							w.Flush()
-							out += buf.String()
-							buf.Reset()
-							// Kernel frames are never DSC frames, so pass false for isDSCFrame
-							out += formatPeekDisassembly(f.PeekBytes, f.PeekAddr, f.PeekFrameIdx, slideVal, i.Config.KernelSlide, i.Config.DSCSlide, false, i.Config.Unslid, f.PeekSymbols, i.Config.Demangle)
-						}
-					}
-					w.Flush()
-					out += buf.String()
-				}
-			}
-			out += "\n"
-		}
-		if len(i.Payload.Notes) > 0 {
-			out += colorField("NOTES") + ":\n"
-			for _, n := range i.Payload.Notes {
-				out += fmt.Sprintf("    - %s\n", n)
-			}
-		}
-	case "Crash", "309":
-		out = fmt.Sprintf("[%s] - %s\n\n", colorTime(i.Header.Timestamp.Format("02Jan2006 15:04:05")), colorError(i.Header.BugTypeDesc))
-		out += fmt.Sprintf(
-			colorField("Process")+":        %s [%d]\n"+
-				colorField("Path")+":           %s\n"+
-				colorField("Parent")+":         %s [%d]\n"+
-				colorField("Hardware Model")+": %s\n"+
-				colorField("OS Version")+":     %s\n"+
-				colorField("BuildID")+":        %s\n"+
-				colorField("LockdownMode")+":            %d\n"+
-				colorField("Was Unlocked Since Boot")+": %d\n"+
-				colorField("Is Locked")+":               %d\n",
-			i.Payload.ProcName, i.Payload.PID,
-			i.Payload.ProcPath,
-			i.Payload.ParentProc, i.Payload.ParentPid,
-			i.Payload.ModelCode,
-			i.Payload.OsVersion.Train,
-			i.Payload.OsVersion.Build,
-			i.Payload.LockdownMode,
-			i.Payload.WasUnlockedSinceBoot,
-			i.Payload.IsLocked,
-		)
-		if i.Payload.SharedCache.Size > 0 {
-			out += fmt.Sprintf(colorField("Shared Cache")+":        %s %s: %#x %s: %d\n", i.Payload.SharedCache.UUID, colorField("base"), i.Payload.SharedCache.Base, colorField("size"), i.Payload.SharedCache.Size)
-		}
-		var exception Exception
-		if err := mapstructure.Decode(i.Payload.Exception, &exception); err == nil {
-			out += fmt.Sprintf("\n%s:      %s (%s) %s\n", colorField("Exception Type"), colorBold(exception.Type), exception.Signal, exception.Message)
-			if len(exception.Subtype) > 0 {
-				out += fmt.Sprintf(colorField("Exception Subtype")+":   %s\n", exception.Subtype)
-			}
-		} else {
-			out += fmt.Sprintf(colorField("Exception")+": %s\n", i.Payload.Exception)
-		}
-		if len(i.Payload.VmRegionInfo) > 0 {
-			out += fmt.Sprintf(colorField("VM Region Info")+": %s\n", i.Payload.VmRegionInfo)
-		}
-		if i.Payload.Asi != nil {
-			out += colorField("ASI") + ":\n"
-			for k, v := range i.Payload.Asi {
-				out += fmt.Sprintf("    %s:\n", k)
-				for _, s := range v {
-					out += fmt.Sprintf("      - %s\n", s)
-				}
-			}
-			out += "\n"
-		}
-		for _, t := range i.Payload.Threads {
-			out += fmt.Sprintf(colorField("Thread")+" %s:", colorBold("%d", t.ID))
+			out.WriteString(fmt.Sprintf(colorField("  Thread")+": %s%s\n", colorBold("%d", t.ID), paniced))
 			if len(t.Name) > 0 {
-				out += colorField(" name") + ": " + t.Name
-				if len(t.Queue) > 0 {
-					out += ","
-				}
+				out.WriteString(fmt.Sprintf("    Name:           %s\n", colorTime(t.Name)))
 			}
-			if len(t.Queue) > 0 {
-				out += colorField(" queue") + ": " + t.Queue
+			if len(t.DispatchQueueLabel) > 0 {
+				out.WriteString(fmt.Sprintf("    Queue:          %s\n", t.DispatchQueueLabel))
 			}
-			if t.Triggered {
-				out += colorError(" (Crashed)\n")
-			} else {
-				out += "\n"
-			}
-			if len(t.Frames) > 0 {
+			out.WriteString(fmt.Sprintf("    State:          %s\n", fmtState(t.State)))
+			out.WriteString(fmt.Sprintf("    Base Priority:  %d\n", t.BasePriority))
+			out.WriteString(fmt.Sprintf("    Sched Priority: %d\n", t.SchedPriority))
+			out.WriteString(fmt.Sprintf("    User Time:      %d usec\n", t.UserUsec))
+			out.WriteString(fmt.Sprintf("    System Time:    %d usec\n", t.SystemUsec))
+			if len(t.UserFrames) > 0 {
+				out.WriteString("    User Frames:\n")
+				isPanickedThread := p.ID == panickedPID && t.ID == panickedTID
 				buf := bytes.NewBufferString("")
 				w := tabwriter.NewWriter(buf, 0, 0, 1, ' ', 0)
-				for idx, f := range t.Frames {
-					addr, name, slideInfo := i.crashFrameAddr(f)
+				for idx, f := range t.UserFrames {
+					if f.ImageName == "absolute" {
+						continue
+					}
+					addr, slideVal, _ := i.panicFrameAddr(f)
+					slideInfo := ""
+					if slideVal > 0 {
+						slideInfo = fmt.Sprintf(" (slide=%#x)", slideVal)
+					}
 					symloc := i.fmtSymbolLocation(f.SymbolLocation)
-					fmt.Fprintf(w, "  %02d: %s\t%s%s %s%s\n", idx, colorImage(name), colorAddr("%#x", addr), slideInfo, colorField(f.Symbol), symloc)
+					fmt.Fprintf(w, "      %02d: %s\t%s%s %s%s\n", idx, colorImage(f.ImageName), colorAddr("%#x", addr), slideInfo, colorField(f.Symbol), symloc)
+					// Add peek disassembly for panicked thread frames
+					if i.Config.Peek && isPanickedThread && len(f.PeekBytes) > 0 {
+						w.Flush()
+						out.WriteString(buf.String())
+						buf.Reset()
+						isDSC := i.isDSCFrame(f)
+						out.WriteString(formatPeekDisassembly(f.PeekBytes, f.PeekAddr, f.PeekFrameIdx, slideVal, i.Config.KernelSlide, i.Config.DSCSlide, isDSC, i.Config.Unslid, f.PeekSymbols, i.Config.Demangle))
+					}
 				}
 				w.Flush()
-				out += buf.String()
+				out.WriteString(buf.String())
 			}
-			if t.Triggered || i.Config.All {
-				out += colorField("Thread") + colorBold(" %d ", t.ID) + colorField(t.ThreadState.Flavor) + "\n" + t.ThreadState.String()
-				if t.Triggered {
-					if len(i.Payload.InstructionByteStream.BeforePC) > 0 {
-						out += colorField("Instructions") + "\n"
-						if b64data, err := base64.StdEncoding.WithPadding(base64.StdPadding).DecodeString(i.Payload.InstructionByteStream.BeforePC); err != nil {
-							log.WithError(err).Errorf("failed to decode BeforePC instruction byte stream")
-						} else {
-							if instructions, err := disassemble.GetInstructions(t.ThreadState.PC.Value-(10*4), b64data); err != nil {
-								log.WithError(err).Errorf("failed to disassemble BeforePC instructions")
-							} else {
-								pad := "    "
-								for _, block := range instructions.Blocks() {
-									for _, i := range block {
-										opStr := strings.TrimSpace(strings.TrimPrefix(i.String(), i.Operation.String()))
-										out += fmt.Sprintf("%s%s:  %s   %s %s\n",
-											pad,
-											colorAddr("%#08x", i.Address),
-											disassemble.GetOpCodeByteString(i.Raw),
-											colorImage("%-7s", i.Operation),
-											disass.ColorOperands(opStr),
-										)
-									}
-									out += "\n"
-								}
-							}
-						}
+			if len(t.KernelFrames) > 0 {
+				out.WriteString("    Kernel Frames:\n")
+				isPanickedThread := p.ID == panickedPID && t.ID == panickedTID
+				buf := bytes.NewBufferString("")
+				w := tabwriter.NewWriter(buf, 0, 0, 1, ' ', 0)
+				for idx, f := range t.KernelFrames {
+					if f.ImageName == "absolute" {
+						continue
 					}
-					if len(i.Payload.InstructionByteStream.AtPC) > 0 {
-						out = strings.TrimSuffix(out, "\n")
-						if b64data, err := base64.StdEncoding.WithPadding(base64.StdPadding).DecodeString(i.Payload.InstructionByteStream.AtPC); err != nil {
-							log.WithError(err).Errorf("failed to decode AtPC instruction byte stream")
-						} else {
-							if instructions, err := disassemble.GetInstructions(t.ThreadState.PC.Value, b64data); err != nil {
-								log.WithError(err).Errorf("failed to disassemble AtPC instructions")
-							} else {
-								for idx, block := range instructions.Blocks() {
-									for jdx, i := range block {
-										pad := "    "
-										if idx == 0 && jdx == 0 {
-											pad = colorError("PC=>")
-										}
-										opStr := strings.TrimSpace(strings.TrimPrefix(i.String(), i.Operation.String()))
-										out += fmt.Sprintf("%s%s:  %s   %s %s\n",
-											pad,
-											colorAddr("%#08x", i.Address),
-											disassemble.GetOpCodeByteString(i.Raw),
-											colorImage("%-7s", i.Operation),
-											disass.ColorOperands(opStr),
-										)
-									}
-									out += "\n"
-								}
-							}
-						}
+					addr, slideVal, _ := i.panicFrameAddr(f)
+					slideInfo := ""
+					if slideVal > 0 {
+						slideInfo = fmt.Sprintf(" (slide=%#x)", slideVal)
+					}
+					symloc := i.fmtSymbolLocation(f.SymbolLocation)
+					fmt.Fprintf(w, "      %02d: %s\t%s%s %s%s\n", idx, colorImage(f.ImageName), colorAddr("%#x", addr), slideInfo, colorField(f.Symbol), symloc)
+					// Add peek disassembly for panicked thread frames
+					if i.Config.Peek && isPanickedThread && len(f.PeekBytes) > 0 {
+						w.Flush()
+						out.WriteString(buf.String())
+						buf.Reset()
+						// Kernel frames are never DSC frames, so pass false for isDSCFrame
+						out.WriteString(formatPeekDisassembly(f.PeekBytes, f.PeekAddr, f.PeekFrameIdx, slideVal, i.Config.KernelSlide, i.Config.DSCSlide, false, i.Config.Unslid, f.PeekSymbols, i.Config.Demangle))
 					}
 				}
+				w.Flush()
+				out.WriteString(buf.String())
 			}
+		}
+		out.WriteString("\n")
+	}
+	return out.String()
+}
+
+// watchdogString renders SystemWatchdogCrash reports (bug_type 409): a userspace
+// watchdog (e.g. WindowServer) hung past its deadline and the system watchdog
+// took the device down. The actionable signal is the termination block naming
+// the service that timed out; the nested stackshot follows for context.
+func (i *Ips) watchdogString() string {
+	var out strings.Builder
+	out.WriteString(i.headerLine())
+
+	if len(i.Payload.Termination.Namespace) > 0 || len(i.Payload.Termination.Details) > 0 {
+		out.WriteString(colorField("Termination") + ":\n")
+		if len(i.Payload.Termination.Namespace) > 0 {
+			out.WriteString(fmt.Sprintf("  Namespace:  %s\n", colorError(i.Payload.Termination.Namespace)))
+		}
+		if i.Payload.Termination.Code != 0 {
+			out.WriteString(fmt.Sprintf("  Code:       %d\n", i.Payload.Termination.Code))
+		}
+		if len(i.Payload.Termination.Indicator) > 0 {
+			out.WriteString(fmt.Sprintf("  Indicator:  %s\n", i.Payload.Termination.Indicator))
+		}
+		for _, d := range i.Payload.Termination.Details {
+			out.WriteString(fmt.Sprintf("  - %s\n", colorError(d)))
+		}
+		out.WriteString("\n")
+	}
+
+	buf := bytes.NewBufferString("")
+	w := tabwriter.NewWriter(buf, 0, 0, 2, ' ', 0)
+	if len(i.Payload.ProcName) > 0 {
+		fmt.Fprintf(w, "%s\t%s [%d]\n", colorField("Process"), colorImage("%s", i.Payload.ProcName), i.Payload.PID)
+	}
+	if len(i.Payload.DisplayState) > 0 {
+		fmt.Fprintf(w, "%s\t%s\n", colorField("Display State"), i.Payload.DisplayState)
+	}
+	if len(i.Payload.ThermalPressureLevel) > 0 {
+		fmt.Fprintf(w, "%s\t%s\n", colorField("Thermal Level"), i.Payload.ThermalPressureLevel)
+	}
+	w.Flush()
+	if buf.Len() > 0 {
+		out.WriteString(buf.String() + "\n")
+	}
+
+	notes := i.Payload.ReportNotes
+	if !i.Config.Verbose {
+		notes = filterStackshotNoise(notes)
+	}
+	if len(notes) > 0 {
+		out.WriteString(colorField("Report Notes") + ":\n")
+		for _, n := range notes {
+			out.WriteString(fmt.Sprintf("  - %s\n", n))
+		}
+		out.WriteString("\n")
+	}
+
+	// Apple sometimes emits a top-level pid of -1 for watchdog timeouts; identify
+	// the offending process by name so its threads still render (lowest matching
+	// pid for a deterministic pick).
+	markedPID := i.Payload.PID
+	if markedPID < 0 && len(i.Payload.ProcName) > 0 {
+		for pid, p := range i.Payload.ProcessByPid {
+			if p.Name == i.Payload.ProcName && (markedPID < 0 || pid < markedPID) {
+				markedPID = pid
+			}
+		}
+	}
+	out.WriteString(i.processDumpString(markedPID, -1))
+	return out.String()
+}
+
+// filterStackshotNoise drops the per-PID stackshot resampling diagnostics
+// ("task_read_for_pid(...) failed", "resampled N of M ...", "... unindexed ...
+// frames from ... pids") that dominate a watchdog report's reportNotes but carry
+// no signal. The remaining notes (e.g. the watchdog explanation) are kept.
+func filterStackshotNoise(notes []string) []string {
+	var out []string
+	for _, n := range notes {
+		if strings.HasPrefix(n, "task_read_for_pid(") ||
+			strings.HasPrefix(n, "resampled ") ||
+			strings.Contains(n, "unindexed") {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// crashString renders userspace crash reports (bug_type 309).
+func (i *Ips) crashString() string {
+	out := fmt.Sprintf("[%s] - %s\n\n", colorTime(i.Header.Timestamp.Format("02Jan2006 15:04:05")), colorError(i.Header.BugTypeDesc))
+	out += fmt.Sprintf(
+		colorField("Process")+":        %s [%d]\n"+
+			colorField("Path")+":           %s\n"+
+			colorField("Parent")+":         %s [%d]\n"+
+			colorField("Hardware Model")+": %s\n"+
+			colorField("OS Version")+":     %s\n"+
+			colorField("BuildID")+":        %s\n"+
+			colorField("LockdownMode")+":            %d\n"+
+			colorField("Was Unlocked Since Boot")+": %d\n"+
+			colorField("Is Locked")+":               %d\n",
+		i.Payload.ProcName, i.Payload.PID,
+		i.Payload.ProcPath,
+		i.Payload.ParentProc, i.Payload.ParentPid,
+		i.Payload.ModelCode,
+		i.Payload.OsVersion.Train,
+		i.Payload.OsVersion.Build,
+		i.Payload.LockdownMode,
+		i.Payload.WasUnlockedSinceBoot,
+		i.Payload.IsLocked,
+	)
+	if i.Payload.SharedCache.Size > 0 {
+		out += fmt.Sprintf(colorField("Shared Cache")+":        %s %s: %#x %s: %d\n", i.Payload.SharedCache.UUID, colorField("base"), i.Payload.SharedCache.Base, colorField("size"), i.Payload.SharedCache.Size)
+	}
+	var exception Exception
+	if err := mapstructure.Decode(i.Payload.Exception, &exception); err == nil {
+		out += fmt.Sprintf("\n%s:      %s (%s) %s\n", colorField("Exception Type"), colorBold(exception.Type), exception.Signal, exception.Message)
+		if len(exception.Subtype) > 0 {
+			out += fmt.Sprintf(colorField("Exception Subtype")+":   %s\n", exception.Subtype)
+		}
+	} else {
+		out += fmt.Sprintf(colorField("Exception")+": %s\n", i.Payload.Exception)
+	}
+	if len(i.Payload.VmRegionInfo) > 0 {
+		out += fmt.Sprintf(colorField("VM Region Info")+": %s\n", i.Payload.VmRegionInfo)
+	}
+	if i.Payload.Asi != nil {
+		out += colorField("ASI") + ":\n"
+		for k, v := range i.Payload.Asi {
+			out += fmt.Sprintf("    %s:\n", k)
+			for _, s := range v {
+				out += fmt.Sprintf("      - %s\n", s)
+			}
+		}
+		out += "\n"
+	}
+	for _, t := range i.Payload.Threads {
+		out += fmt.Sprintf(colorField("Thread")+" %s:", colorBold("%d", t.ID))
+		if len(t.Name) > 0 {
+			out += colorField(" name") + ": " + t.Name
+			if len(t.Queue) > 0 {
+				out += ","
+			}
+		}
+		if len(t.Queue) > 0 {
+			out += colorField(" queue") + ": " + t.Queue
+		}
+		if t.Triggered {
+			out += colorError(" (Crashed)\n")
+		} else {
 			out += "\n"
 		}
-		if len(i.Payload.LastExceptionBacktrace) > 0 {
-			out += colorField("Last Exception Backtrace") + ":\n"
+		if len(t.Frames) > 0 {
 			buf := bytes.NewBufferString("")
 			w := tabwriter.NewWriter(buf, 0, 0, 1, ' ', 0)
-			for idx, f := range i.Payload.LastExceptionBacktrace {
+			for idx, f := range t.Frames {
 				addr, name, slideInfo := i.crashFrameAddr(f)
 				symloc := i.fmtSymbolLocation(f.SymbolLocation)
 				fmt.Fprintf(w, "  %02d: %s\t%s%s %s%s\n", idx, colorImage(name), colorAddr("%#x", addr), slideInfo, colorField(f.Symbol), symloc)
 			}
 			w.Flush()
-			out += buf.String() + "\n"
+			out += buf.String()
 		}
-		if len(i.Payload.VMSummary) > 0 {
-			out += colorField("VM Summary") + ":\n" + colorVMSummary(i.Payload.VMSummary)
+		if t.Triggered || i.Config.All {
+			out += colorField("Thread") + colorBold(" %d ", t.ID) + colorField(t.ThreadState.Flavor) + "\n" + t.ThreadState.String()
+			if t.Triggered {
+				if len(i.Payload.InstructionByteStream.BeforePC) > 0 {
+					out += colorField("Instructions") + "\n"
+					if b64data, err := base64.StdEncoding.WithPadding(base64.StdPadding).DecodeString(i.Payload.InstructionByteStream.BeforePC); err != nil {
+						log.WithError(err).Errorf("failed to decode BeforePC instruction byte stream")
+					} else {
+						if instructions, err := disassemble.GetInstructions(t.ThreadState.PC.Value-(10*4), b64data); err != nil {
+							log.WithError(err).Errorf("failed to disassemble BeforePC instructions")
+						} else {
+							pad := "    "
+							for _, block := range instructions.Blocks() {
+								for _, i := range block {
+									opStr := strings.TrimSpace(strings.TrimPrefix(i.String(), i.Operation.String()))
+									out += fmt.Sprintf("%s%s:  %s   %s %s\n",
+										pad,
+										colorAddr("%#08x", i.Address),
+										disassemble.GetOpCodeByteString(i.Raw),
+										colorImage("%-7s", i.Operation),
+										disass.ColorOperands(opStr),
+									)
+								}
+								out += "\n"
+							}
+						}
+					}
+				}
+				if len(i.Payload.InstructionByteStream.AtPC) > 0 {
+					out = strings.TrimSuffix(out, "\n")
+					if b64data, err := base64.StdEncoding.WithPadding(base64.StdPadding).DecodeString(i.Payload.InstructionByteStream.AtPC); err != nil {
+						log.WithError(err).Errorf("failed to decode AtPC instruction byte stream")
+					} else {
+						if instructions, err := disassemble.GetInstructions(t.ThreadState.PC.Value, b64data); err != nil {
+							log.WithError(err).Errorf("failed to disassemble AtPC instructions")
+						} else {
+							for idx, block := range instructions.Blocks() {
+								for jdx, i := range block {
+									pad := "    "
+									if idx == 0 && jdx == 0 {
+										pad = colorError("PC=>")
+									}
+									opStr := strings.TrimSpace(strings.TrimPrefix(i.String(), i.Operation.String()))
+									out += fmt.Sprintf("%s%s:  %s   %s %s\n",
+										pad,
+										colorAddr("%#08x", i.Address),
+										disassemble.GetOpCodeByteString(i.Raw),
+										colorImage("%-7s", i.Operation),
+										disass.ColorOperands(opStr),
+									)
+								}
+								out += "\n"
+							}
+						}
+					}
+				}
+			}
 		}
-	default:
-		return fmt.Sprintf("%s: (unsupported, notify author)", i.Header.BugType)
+		out += "\n"
 	}
-
+	if len(i.Payload.LastExceptionBacktrace) > 0 {
+		out += colorField("Last Exception Backtrace") + ":\n"
+		buf := bytes.NewBufferString("")
+		w := tabwriter.NewWriter(buf, 0, 0, 1, ' ', 0)
+		for idx, f := range i.Payload.LastExceptionBacktrace {
+			addr, name, slideInfo := i.crashFrameAddr(f)
+			symloc := i.fmtSymbolLocation(f.SymbolLocation)
+			fmt.Fprintf(w, "  %02d: %s\t%s%s %s%s\n", idx, colorImage(name), colorAddr("%#x", addr), slideInfo, colorField(f.Symbol), symloc)
+		}
+		w.Flush()
+		out += buf.String() + "\n"
+	}
+	if len(i.Payload.VMSummary) > 0 {
+		out += colorField("VM Summary") + ":\n" + colorVMSummary(i.Payload.VMSummary)
+	}
 	return out
 }

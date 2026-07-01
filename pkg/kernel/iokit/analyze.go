@@ -20,16 +20,17 @@ const (
 )
 
 type methodAnalysis struct {
-	kind            string
-	addr            uint64
-	owner           *macho.File
-	arrayBase       uint64
-	arrayBases      []uint64
-	selectedEntries map[int]uint64
-	stride          uint64
-	count           int
-	note            string
-	switchCases     map[int]switchCaseInfo
+	kind               string
+	addr               uint64
+	owner              *macho.File
+	arrayBase          uint64
+	arrayBases         []uint64
+	selectedEntries    map[int]uint64
+	stride             uint64
+	count              int
+	selectorLowerBound int
+	note               string
+	switchCases        map[int]switchCaseInfo
 }
 
 type switchCaseInfo struct {
@@ -53,6 +54,16 @@ type linearExpr struct {
 
 type decodedInst struct {
 	disassemble.Inst
+}
+
+type selectorWindow struct {
+	count      int
+	lowerBound int
+}
+
+type pendingBiasedSelectorCompare struct {
+	compare    int
+	lowerBound int
 }
 
 func (a *analyzer) analyzeExternalMethod(addr uint64, kindHint string) methodAnalysis {
@@ -79,7 +90,9 @@ func (a *analyzer) analyzeExternalMethodUncached(addr uint64, kindHint string) m
 	regs[1] = linearExpr{valid: true, coeff: 1}
 
 	selectorBound := -1
+	biasedBound := selectorWindow{count: -1}
 	pendingCompare := -1
+	pendingBiased := pendingBiasedSelectorCompare{compare: -1}
 	lastSelectorCompare := -1
 	sawSelectorBranch := false
 	var selectedDispatch [31]map[int]uint64
@@ -94,11 +107,24 @@ func (a *analyzer) analyzeExternalMethodUncached(addr uint64, kindHint string) m
 			}
 			pendingCompare = -1
 		}
+		if pendingBiased.compare >= 0 {
+			if count, ok := selectorCountFromBranch(inst, pendingBiased.compare); ok {
+				biasedBound = selectorWindow{count: count, lowerBound: pendingBiased.lowerBound}
+			}
+			pendingBiased = pendingBiasedSelectorCompare{compare: -1}
+		}
 		if count, ok := selectorCompareCount(inst, regs); ok {
 			pendingCompare = count
 			lastSelectorCompare = count
 			if selectorBound < 0 {
 				selectorBound = count
+			}
+		} else if pending, ok := biasedSelectorCompare(inst, regs); ok {
+			pendingBiased = pending
+			if biasedBound.count < 0 {
+				// Before seeing the branch, assume the canonical (selector-k) > N
+				// shape. The branch-specific path above tightens this for >= tests.
+				biasedBound = selectorWindow{count: pending.compare + 1, lowerBound: pending.lowerBound}
 			}
 		}
 		applySelectedDispatchInstruction(inst, regs[:], &selectedDispatch, lastSelectorCompare)
@@ -107,7 +133,7 @@ func (a *analyzer) analyzeExternalMethodUncached(addr uint64, kindHint string) m
 			if hint == "" {
 				hint = kindHint
 			}
-			if analysis, ok := a.dispatchAnalysisFromExpr(addr, body.Owner, regs[3], regs[4], selectorBound, hint); ok {
+			if analysis, ok := a.dispatchAnalysisFromExpr(addr, body.Owner, regs[3], regs[4], dispatchSelectorBound(selectorBound, biasedBound), hint); ok {
 				best = analysis
 			} else if analysis, ok := selectedDispatchAnalysis(addr, body.Owner, selectedDispatch[3], hint); ok {
 				best = analysis
@@ -305,9 +331,14 @@ func cloneSelectedDispatchEntries(entries map[int]uint64) map[int]uint64 {
 	return out
 }
 
-func (a *analyzer) dispatchAnalysisFromExpr(addr uint64, owner *macho.File, dispatchExpr, countExpr linearExpr, count int, kindHint string) (methodAnalysis, bool) {
+func (a *analyzer) dispatchAnalysisFromExpr(addr uint64, owner *macho.File, dispatchExpr, countExpr linearExpr, bounds selectorWindow, kindHint string) (methodAnalysis, bool) {
+	count := bounds.count
 	if count <= 0 && countExpr.valid && countExpr.coeff == 0 && countExpr.base > 0 && countExpr.base <= maxSelectorCount {
+		if !a.registerCountCorroborated(owner, dispatchExpr, int(countExpr.base), kindHint) {
+			return methodAnalysis{}, false
+		}
 		count = int(countExpr.base)
+		bounds = selectorWindow{count: count}
 	}
 	if dispatchExpr.valid && dispatchExpr.coeff == 0 && dispatchExpr.base != 0 && count > 0 && count <= maxSelectorCount {
 		bases := exprBases(dispatchExpr)
@@ -320,14 +351,15 @@ func (a *analyzer) dispatchAnalysisFromExpr(addr uint64, owner *macho.File, disp
 			note = "conditional_array"
 		}
 		return methodAnalysis{
-			kind:       kind,
-			addr:       addr,
-			owner:      owner,
-			arrayBase:  bases[0],
-			arrayBases: bases,
-			stride:     stride,
-			count:      count,
-			note:       note,
+			kind:               kind,
+			addr:               addr,
+			owner:              owner,
+			arrayBase:          bases[0],
+			arrayBases:         bases,
+			stride:             stride,
+			count:              count,
+			selectorLowerBound: bounds.lowerBound,
+			note:               note,
 		}, true
 	}
 	expr := dispatchExpr
@@ -343,15 +375,19 @@ func (a *analyzer) dispatchAnalysisFromExpr(addr uint64, owner *macho.File, disp
 	default:
 		return methodAnalysis{}, false
 	}
-	bases := exprBases(expr)
+	bases, ok := normalizedDispatchBases(expr, bounds.lowerBound)
+	if !ok {
+		return methodAnalysis{}, false
+	}
 	analysis := methodAnalysis{
-		kind:       kind,
-		addr:       addr,
-		owner:      owner,
-		arrayBase:  bases[0],
-		arrayBases: bases,
-		stride:     expr.coeff,
-		count:      count,
+		kind:               kind,
+		addr:               addr,
+		owner:              owner,
+		arrayBase:          bases[0],
+		arrayBases:         bases,
+		stride:             expr.coeff,
+		count:              count,
+		selectorLowerBound: bounds.lowerBound,
 	}
 	if len(bases) > 1 {
 		analysis.note = "conditional_array"
@@ -360,6 +396,56 @@ func (a *analyzer) dispatchAnalysisFromExpr(addr uint64, owner *macho.File, disp
 		analysis.note = "bounds_unknown"
 	}
 	return analysis, true
+}
+
+// registerCountCorroborated guards the register-derived dispatch count.
+// The dispatchCount lives in X4 only for the IOUserClient2022
+// dispatchExternalMethod(selector, args, dispatch, count, target, ref)
+// form, where the count is also CMP'd against the selector (the
+// selectorBound path). When no such comparison bound exists, an X4 value
+// is just as likely to be a leaked constant from the single-method
+// externalMethod form (for example the low bits of a kIOReturn* error
+// immediate). The count is accepted only when the last spanned dispatch
+// entry of EVERY candidate base resolves to a real function body.
+// dispatchRecords later emits count selectors for every base in
+// arrayBases, so for a conditional-array dispatch a single bogus/shorter
+// alternate base would otherwise be over-read into adjacent data;
+// requiring all bases to corroborate fails the whole table closed instead.
+func (a *analyzer) registerCountCorroborated(owner *macho.File, dispatchExpr linearExpr, count int, kindHint string) bool {
+	if count <= 0 {
+		return false
+	}
+	bases := exprBases(dispatchExpr)
+	if len(bases) == 0 {
+		return false
+	}
+	for _, base := range bases {
+		if !a.lastDispatchEntryResolves(owner, base, count, kindHint) {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *analyzer) lastDispatchEntryResolves(owner *macho.File, base uint64, count int, kindHint string) bool {
+	strides := []uint64{dispatchSizeClassic, dispatchSize2022}
+	switch kindHint {
+	case DispatchExternalMethod2022:
+		strides = []uint64{dispatchSize2022}
+	case DispatchExternalMethod:
+		strides = []uint64{dispatchSizeClassic}
+	}
+	for _, stride := range strides {
+		addr := base + uint64(count-1)*stride
+		fn, ok := a.scanner.ReadPointerAt(owner, addr)
+		if !ok || fn == 0 {
+			continue
+		}
+		if _, err := a.scanner.FunctionBodyAt(fn); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *analyzer) inferDispatchStride(owner *macho.File, bases []uint64, count int, kindHint string) (uint64, string, bool) {
@@ -507,6 +593,8 @@ func applyMethodInstruction(a *analyzer, owner *macho.File, inst *disassemble.In
 		}
 	case disassemble.ARM64_ADD:
 		applyAdd(inst, regs)
+	case disassemble.ARM64_SUB:
+		applySub(inst, regs)
 	case disassemble.ARM64_LDR, disassemble.ARM64_LDUR:
 		applyLoad(a, owner, inst, regs)
 	case disassemble.ARM64_MOV:
@@ -561,6 +649,35 @@ func applyAdd(inst *disassemble.Inst, regs []linearExpr) {
 	}
 	right := shiftedExpr(regs[rightIdx], &inst.Operands[2])
 	regs[rd] = combineExpr(left, right)
+}
+
+// applySub models only the `SUB rD, rN, #imm` immediate form, which the
+// compiler emits to bias a selector before bounding it (the canonical
+// (selector - k) > N idiom in IOUserClient::externalMethod dispatchers that
+// reserve selector 0). The biased value is tracked as a linear expression so
+// biasedSelectorCompare can recover the true selector bound. Register-
+// operand SUBs clear the destination (they are not part of this idiom).
+func applySub(inst *disassemble.Inst, regs []linearExpr) {
+	rd, ok := destRegIndex(inst)
+	if !ok {
+		return
+	}
+	leftIdx, ok := operandRegIndex(inst, 1)
+	if !ok {
+		clearReg(regs, rd, "indirect")
+		return
+	}
+	imm, ok := operandImm(inst, 2)
+	if !ok || !operandIsImmediate(inst, 2) {
+		clearReg(regs, rd, "indirect")
+		return
+	}
+	left := regs[leftIdx]
+	if !left.valid {
+		clearReg(regs, rd, left.note)
+		return
+	}
+	regs[rd] = addImmediateExpr(left, 0-imm)
 }
 
 func applyLoad(a *analyzer, owner *macho.File, inst *disassemble.Inst, regs []linearExpr) {
@@ -841,6 +958,25 @@ func exprBases(expr linearExpr) []uint64 {
 	return []uint64{expr.base}
 }
 
+func normalizedDispatchBases(expr linearExpr, selectorLowerBound int) ([]uint64, bool) {
+	bases := exprBases(expr)
+	if selectorLowerBound <= 0 || expr.coeff == 0 {
+		return bases, true
+	}
+	adjust, ok := checkedMul(uint64(selectorLowerBound), expr.coeff)
+	if !ok {
+		return nil, false
+	}
+	out := make([]uint64, 0, len(bases))
+	for _, base := range bases {
+		if base > ^uint64(0)-adjust {
+			return nil, false
+		}
+		out = append(out, base+adjust)
+	}
+	return compactUint64s(out), true
+}
+
 func compactUint64s(items []uint64) []uint64 {
 	if len(items) == 0 {
 		return nil
@@ -899,6 +1035,56 @@ func compareCountForIndexReg(inst *disassemble.Inst, regs [31]linearExpr, isInde
 		return int(val.base), true
 	}
 	return 0, false
+}
+
+// biasedSelectorCompare recovers a selector bound from the
+// `SUB rTmp, selector, #k; CMP rTmp, #N` idiom, where the compared register
+// holds the selector biased by a nonzero constant (coeff == 1, base == -k). It
+// returns the compared biased-index limit plus the external selector lower bound
+// k. This is intentionally separate from selectorCompareCount: the bound it
+// produces feeds only the static dispatch-table path, never the switch fallback,
+// so switch dispatchers that happen to bias their selector keep their existing
+// classification.
+func biasedSelectorCompare(inst *disassemble.Inst, regs [31]linearExpr) (pendingBiasedSelectorCompare, bool) {
+	if inst == nil || operandCount(inst) < 2 {
+		return pendingBiasedSelectorCompare{}, false
+	}
+	opName := strings.ToLower(inst.Operation.String())
+	if opName != "cmp" && opName != "subs" {
+		return pendingBiasedSelectorCompare{}, false
+	}
+	reg, ok := operandReg(inst, 0)
+	if !ok || isSelectorReg(reg) {
+		return pendingBiasedSelectorCompare{}, false
+	}
+	idx, ok := regIndex(reg)
+	if !ok || idx >= len(regs) {
+		return pendingBiasedSelectorCompare{}, false
+	}
+	val := regs[idx]
+	if !val.valid || val.coeff != 1 || val.base == 0 || len(val.alts) != 0 {
+		return pendingBiasedSelectorCompare{}, false
+	}
+	imm, ok := operandImm(inst, 1)
+	if !ok {
+		return pendingBiasedSelectorCompare{}, false
+	}
+	lowerBound := 0 - val.base
+	if lowerBound == 0 || lowerBound > maxSelectorCount || imm > maxSelectorCount {
+		return pendingBiasedSelectorCompare{}, false
+	}
+	return pendingBiasedSelectorCompare{compare: int(imm), lowerBound: int(lowerBound)}, true
+}
+
+// dispatchSelectorBound picks the selector window handed to the dispatch-table
+// path. The direct X1/W1 compare wins when present; the biased-selector window
+// (from the SUB-then-compare idiom) is the fallback so a static dispatch table
+// can still be sized without treating selector 0 as table[-1].
+func dispatchSelectorBound(selectorBound int, biasedBound selectorWindow) selectorWindow {
+	if selectorBound > 0 {
+		return selectorWindow{count: selectorBound}
+	}
+	return biasedBound
 }
 
 func selectorCountFromBranch(inst *disassemble.Inst, compare int) (int, bool) {
