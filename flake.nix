@@ -57,8 +57,16 @@
           module.imports = [dev];
         };
 
-        perSystem = {config, ...}: {
-          packages.default = config.packages.ipsw;
+        perSystem = {
+          config,
+          pkgs,
+          ...
+        }: {
+          config = {
+            # current nixpkgs contains llvmPackages_23 which is not yet cached
+            build.llvm.packages = pkgs.llvmPackages_22;
+            packages.default = config.packages.ipsw;
+          };
         };
 
         flake = {inherit flakeModules;};
