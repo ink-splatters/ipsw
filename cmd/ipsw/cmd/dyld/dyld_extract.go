@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 
@@ -53,12 +54,33 @@ func rebaseMachO(dsc *dyld.File, machoPath string) error {
 	}
 	defer f.Close()
 
-	mm, err := macho.NewFile(f)
+	m, err := macho.NewFile(f)
 	if err != nil {
 		return err
 	}
+	image, err := dsc.GetImageContainingTextAddr(m.GetBaseAddress())
+	if err != nil {
+		return err
+	}
+	src, err := image.GetPartialMacho()
+	if err != nil {
+		return err
+	}
+	pointerSize := uint64(8)
+	if !dsc.Is64bit() {
+		pointerSize = 4
+	}
 
-	for _, seg := range mm.Segments() {
+	// Export pads segment sizes; cache headers retain the original extents
+	for _, seg := range src.Segments() {
+		// Export rebuilds __LINKEDIT; its cache rebases no longer apply
+		if seg.Filesz == 0 || seg.Name == "__LINKEDIT" {
+			continue
+		}
+		exported := m.Segment(seg.Name)
+		if exported == nil || exported.Addr != seg.Addr || exported.Filesz < seg.Filesz {
+			return fmt.Errorf("exported segment %s does not match its cache layout", seg.Name)
+		}
 		uuid, mapping, err := dsc.GetMappingForVMAddress(seg.Addr)
 		if err != nil {
 			return err
@@ -68,26 +90,45 @@ func rebaseMachO(dsc *dyld.File, machoPath string) error {
 			continue
 		}
 
+		pageSize := uint64(dsc.SlideInfo.GetPageSize())
 		startAddr := seg.Addr - mapping.Address
-		endAddr := ((seg.Addr + seg.Memsz) - mapping.Address) + uint64(dsc.SlideInfo.GetPageSize())
+		if seg.Filesz > mapping.Size-startAddr {
+			return fmt.Errorf("segment %s: file size %#x exceeds remaining mapping size %#x", seg.Name, seg.Filesz, mapping.Size-startAddr)
+		}
+		start := startAddr / pageSize
+		// Round from the last byte so an aligned end does not include the next page
+		end := (startAddr+seg.Filesz-1)/pageSize + 1
+		pages := dyld.PageRange{Start: start, End: end}
 
-		start := startAddr / uint64(dsc.SlideInfo.GetPageSize())
-		end := endAddr / uint64(dsc.SlideInfo.GetPageSize())
-
-		rebases, err := dsc.GetRebaseInfoForPages(uuid, mapping, start, end)
+		rebases, err := dsc.GetRebaseInfoForPages(uuid, mapping, pages)
 		if err != nil {
 			return err
 		}
 
 		for _, rebase := range rebases {
-			off, err := mm.GetOffset(rebase.CacheVMAddress)
-			if err != nil {
+			// A slide page can contain pointers from neighboring segments
+			if rebase.CacheVMAddress < seg.Addr || rebase.CacheVMAddress-seg.Addr >= seg.Filesz {
 				continue
+			}
+			rel := rebase.CacheVMAddress - seg.Addr
+			if seg.Filesz-rel < pointerSize {
+				return fmt.Errorf("rebase at %#x extends beyond segment %s", rebase.CacheVMAddress, seg.Name)
+			}
+			// Padded VM ranges can overlap, so use this segment's output offset directly
+			off := exported.Offset + rel
+			if off < exported.Offset || off > math.MaxInt64 {
+				return fmt.Errorf("rebase at %#x overflows the exported file offset", rebase.CacheVMAddress)
 			}
 			if _, err := f.Seek(int64(off), io.SeekStart); err != nil {
 				return fmt.Errorf("failed to seek in exported file to offset %#x from the start: %v", off, err)
 			}
-			if err := binary.Write(f, dsc.ByteOrder, rebase.Target); err != nil {
+			// Rebase.Target is uint64, but Apple's v4 format requires uint32_t writes:
+			// https://github.com/apple-oss-distributions/dyld/blob/fd8d0c4d52320ebf64db34f3cb280310d905c5ae/include/mach-o/dyld_cache_format.h#L451-L469
+			var target any = rebase.Target
+			if pointerSize == 4 {
+				target = uint32(rebase.Target)
+			}
+			if err := binary.Write(f, dsc.ByteOrder, target); err != nil {
 				return fmt.Errorf("failed to write rebase address %#x: %v", rebase.Target, err)
 			}
 		}
