@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -452,8 +453,16 @@ func (i *CacheImage) relativeSelectorBase() (uint64, error) {
 }
 
 func (i *CacheImage) partialRelativeSelectorBase() (uint64, error) {
-	if i.Name == "/usr/lib/libobjc.A.dylib" {
+	// Legacy optimization lookup opens libobjc's Mach-O headers.
+	// Avoid re-entering that lookup.
+	if slices.Contains(libObjCPaths[:], i.Name) {
 		return 0, nil
+	}
+	// Avoid repeating the dylib-trie lookup for unrelated images.
+	if strings.EqualFold(filepath.Base(i.Name), libObjCName) {
+		if image, err := i.cache.libObjCImage(); err == nil && image.Name == i.Name {
+			return 0, nil
+		}
 	}
 
 	return i.relativeSelectorBase()
@@ -461,7 +470,10 @@ func (i *CacheImage) partialRelativeSelectorBase() (uint64, error) {
 
 func (f *File) relativeSelectorBase() (uint64, error) {
 	f.rsBaseOnce.Do(func() {
-		if _, err := f.Image("/usr/lib/libobjc.A.dylib"); err != nil {
+		if _, err := f.libObjCImage(); err != nil {
+			if !errors.Is(err, ErrImageNotFound) {
+				f.rsBaseErr = err
+			}
 			return
 		}
 
@@ -726,6 +738,10 @@ func (i *CacheImage) ParseSlideInfo() error {
 	}
 
 	for _, seg := range m.Segments() {
+		// Zero-fill tails have no cache pointers to decode
+		if seg.Filesz == 0 {
+			continue
+		}
 		uuid, mapping, err := i.cache.GetMappingForVMAddress(seg.Addr)
 		if err != nil {
 			return err
@@ -735,13 +751,17 @@ func (i *CacheImage) ParseSlideInfo() error {
 			continue
 		}
 
+		pageSize := uint64(i.cache.SlideInfo.GetPageSize())
 		startAddr := seg.Addr - mapping.Address
-		endAddr := ((seg.Addr + seg.Memsz) - mapping.Address) + uint64(i.cache.SlideInfo.GetPageSize())
+		if seg.Filesz > mapping.Size-startAddr {
+			return fmt.Errorf("segment %s: file size %#x exceeds remaining mapping size %#x", seg.Name, seg.Filesz, mapping.Size-startAddr)
+		}
+		start := startAddr / pageSize
+		// Round from the last byte so an aligned end does not include the next page
+		end := (startAddr+seg.Filesz-1)/pageSize + 1
+		pages := PageRange{Start: start, End: end}
 
-		start := startAddr / uint64(i.cache.SlideInfo.GetPageSize())
-		end := endAddr / uint64(i.cache.SlideInfo.GetPageSize())
-
-		rs, err := i.cache.GetRebaseInfoForPages(uuid, mapping, start, end)
+		rs, err := i.cache.GetRebaseInfoForPages(uuid, mapping, pages)
 		if err != nil {
 			return err
 		}
@@ -788,7 +808,7 @@ func (i *CacheImage) ParseObjC() error {
 		if err := i.cache.MethodsForImage(i.Name); err != nil {
 			return fmt.Errorf("failed to parse objc methods for image %s: %v", filepath.Base(i.Name), err)
 		}
-		if strings.Contains(i.Name, "libobjc.A.dylib") {
+		if strings.Contains(i.Name, libObjCName) {
 			if _, err := i.cache.GetAllObjCSelectors(false); err != nil {
 				return fmt.Errorf("failed to parse objc all selectors: %v", err)
 			}
